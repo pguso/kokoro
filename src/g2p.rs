@@ -150,6 +150,34 @@ fn previous_word(tokens: &[String], idx: usize) -> Option<String> {
         .cloned()
 }
 
+/// Split PascalCase / camelCase at a lowercase→uppercase boundary (`AlphaGo` → `Alpha` + `Go`).
+fn split_camel_case_segments(token: &str) -> Option<Vec<String>> {
+    let chars: Vec<char> = token.chars().collect();
+    if chars.len() < 3 {
+        return None;
+    }
+    if !chars.iter().any(|c| c.is_ascii_lowercase())
+        || !chars.iter().any(|c| c.is_ascii_uppercase())
+    {
+        return None;
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for i in 0..chars.len() {
+        let ch = chars[i];
+        if i > 0 && ch.is_ascii_uppercase() && chars[i - 1].is_ascii_lowercase() {
+            if !cur.is_empty() {
+                out.push(std::mem::take(&mut cur));
+            }
+        }
+        cur.push(ch);
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    (out.len() > 1).then_some(out)
+}
+
 /// Tokens before `idx` whose alphanumeric stem matches a simple past-narrative cue.
 fn sentence_has_past_markers_before(tokens: &[String], idx: usize) -> bool {
     const MARKERS: &[&str] = &["yesterday", "ago", "last", "earlier", "previously"];
@@ -388,6 +416,32 @@ pub fn g2p(text: &str, use_v11: bool) -> Result<String, G2PError> {
                 next_word: next_word(&tokens, idx),
                 past_markers_before: sentence_has_past_markers_before(&tokens, idx),
             };
+            // PascalCase compounds ("AlphaGo"): no CMUdict headword; split like Alpha + Go instead
+            // of eSpeak spelling each letter.
+            if let Some(parts) = split_camel_case_segments(token) {
+                let whole_hit = lexicon::lexicon_lookup(token).is_some()
+                    || backend.lookup_word(token, &token_context).is_some();
+                if whole_hit {
+                    let (ipa, source) = backend.resolve_word(token, &token_context)?;
+                    let ipa = normalize_ipa_for_vocab(&ipa, use_v11);
+                    trace_token_g2p(token, &ipa, source);
+                    append_lexical(&mut result, &ipa);
+                    continue;
+                }
+                for part in parts {
+                    if is_acronym(&part) {
+                        let ipa = normalize_ipa_for_vocab(&letters_to_ipa(&part), use_v11);
+                        trace_token_g2p(&part, &ipa, BackendSource::Dictionary);
+                        append_lexical(&mut result, &ipa);
+                        continue;
+                    }
+                    let (ipa, source) = backend.resolve_word(&part, &token_context)?;
+                    let ipa = normalize_ipa_for_vocab(&ipa, use_v11);
+                    trace_token_g2p(&part, &ipa, source);
+                    append_lexical(&mut result, &ipa);
+                }
+                continue;
+            }
             // Hyphenated tokens: prefer CMUdict/lexicon as one headword ("co-founder"); otherwise
             // phonemize segments ("Text-to-image" → text / to / image) instead of eSpeak on the
             // raw string (letter garbage).
@@ -680,5 +734,53 @@ mod tests {
             "expected single-entry compound 'co-founder', got {p:?}"
         );
         Ok(())
+    }
+
+    #[test]
+    fn finance_uses_noun_cmudict_variant() -> Result<(), super::G2PError> {
+        let p = super::g2p("a finance professor.", false)?;
+        assert!(
+            p.contains("fˈaɪn"),
+            "expected noun stress FI-nance (CMU finance(3)), got {p:?}"
+        );
+        assert!(
+            !p.contains("fənˈæns"),
+            "verb stress fi-NANCE should not be default for this phrase: {p:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn finance_after_to_keeps_verb_cmudict_variant() -> Result<(), super::G2PError> {
+        let p = super::g2p("to finance the plan.", false)?;
+        assert!(
+            p.contains("fənˈæns") || p.contains("fɪnˈæns"),
+            "expected verb fi-NANCE after 'to', got {p:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn camel_case_splits_alpha_go() -> Result<(), super::G2PError> {
+        let p = super::g2p("AlphaGo.", false)?;
+        assert!(
+            !p.contains("ˈɛlpˈi"),
+            "should not letter-spell PascalCase: {p:?}"
+        );
+        assert!(
+            p.contains("ˈælfə") && p.contains("ɡˈoʊ"),
+            "expected CMUdict alpha + go, got {p:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn camel_case_segment_boundaries() {
+        assert_eq!(
+            super::split_camel_case_segments("AlphaGo").unwrap(),
+            vec!["Alpha".to_string(), "Go".to_string()]
+        );
+        assert!(super::split_camel_case_segments("alphago").is_none());
+        assert!(super::split_camel_case_segments("XML").is_none());
     }
 }

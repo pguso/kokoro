@@ -43,8 +43,8 @@ pub trait EnglishG2pBackend {
 #[derive(Default)]
 pub struct HybridEnglishBackend;
 
-fn ipa_from_cmudict_rules(rules: &[Rule]) -> Option<String> {
-    let pronunciation = rules.first()?.pronunciation();
+fn ipa_from_cmudict_rule(rule: &Rule) -> Option<String> {
+    let pronunciation = rule.pronunciation();
     let ipa = pronunciation
         .iter()
         .map(|p| crate::arpa_to_ipa(&p.to_string()).unwrap_or_default())
@@ -52,8 +52,8 @@ fn ipa_from_cmudict_rules(rules: &[Rule]) -> Option<String> {
     if ipa.is_empty() { None } else { Some(ipa) }
 }
 
-fn lookup_cmudict_key(dict: &Cmudict, key: &str) -> Option<String> {
-    dict.get(key).and_then(ipa_from_cmudict_rules)
+fn ipa_from_cmudict_rules(rules: &[Rule]) -> Option<String> {
+    ipa_from_cmudict_rule(rules.first()?)
 }
 
 impl HybridEnglishBackend {
@@ -82,19 +82,48 @@ impl EnglishG2pBackend for HybridEnglishBackend {
     fn lookup_word(&self, token: &str, context: &TokenContext) -> Option<String> {
         let dict = CMUDICT.as_ref()?;
 
+        // CMUdict merges `word`, `word(2)`, … under one key; variants are `Rule`s in file order.
         if token.eq_ignore_ascii_case("read") {
+            let rules = dict.get("read")?;
             let prefer_present = !context.past_markers_before;
-            let keys: &[&str] = if prefer_present {
-                &["read(2)", "read"]
+            let idx = if prefer_present && rules.len() > 1 {
+                1
             } else {
-                &["read", "read(2)"]
+                0
             };
-            for key in keys {
-                if let Some(ipa) = lookup_cmudict_key(dict, key) {
-                    return Some(ipa);
-                }
-            }
-            return None;
+            let rule = rules.get(idx).or_else(|| rules.first())?;
+            return ipa_from_cmudict_rule(rule);
+        }
+
+        if token.eq_ignore_ascii_case("finance") {
+            let rules = dict.get("finance")?;
+            let prev = context
+                .previous_word
+                .as_deref()
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            let verb_hint = matches!(
+                prev.as_str(),
+                "to" | "will"
+                    | "would"
+                    | "can"
+                    | "could"
+                    | "should"
+                    | "must"
+                    | "may"
+                    | "might"
+                    | "let's"
+                    | "lets"
+            );
+            let idx = if verb_hint {
+                0
+            } else if rules.len() > 2 {
+                2
+            } else {
+                0
+            };
+            let rule = rules.get(idx).or_else(|| rules.first())?;
+            return ipa_from_cmudict_rule(rule);
         }
 
         let token_candidates = [
