@@ -55,7 +55,7 @@ impl<S> SynthSink<S> {
     /// `String`, so a plain voice name works:
     ///
     /// ```no_run
-    /// use kokoro_tts::{KokoroTts, Voice};
+    /// use kokoro_en::{KokoroTts, Voice};
     ///
     /// #[tokio::main]
     /// async fn main() {
@@ -74,7 +74,7 @@ impl<S> SynthSink<S> {
     /// Send a synthesis request for `text` using the currently configured voice.
     ///
     /// ```no_run
-    /// use kokoro_tts::KokoroTts;
+    /// use kokoro_en::KokoroTts;
     ///
     /// #[tokio::main]
     /// async fn main() {

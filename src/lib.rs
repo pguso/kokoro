@@ -72,7 +72,10 @@ fn configure_execution_providers(builder: SessionBuilder) -> SessionBuilder {
         .as_str()
     {
         "all" => ComputeUnits::All,
-        "ane" | "neural_engine" | "neural-engine" | "cpu_and_neural_engine"
+        "ane"
+        | "neural_engine"
+        | "neural-engine"
+        | "cpu_and_neural_engine"
         | "cpu-and-neural-engine" => ComputeUnits::CPUAndNeuralEngine,
         "gpu" | "cpu_and_gpu" | "cpu-and-gpu" => ComputeUnits::CPUAndGPU,
         "cpu_only" | "cpu-only" | "cpuonly" => ComputeUnits::CPUOnly,
@@ -313,8 +316,7 @@ fn decode_voice_pack(bytes: &[u8]) -> Result<Vec<Vec<Vec<f32>>>, KokoroError> {
     if let Some(pack) = decode_raw_f32_voice_pack(bytes) {
         return Ok(pack);
     }
-    if let Ok((pack, _)) =
-        decode_from_slice::<Vec<Vec<Vec<f32>>>, _>(bytes, voice_decode_config())
+    if let Ok((pack, _)) = decode_from_slice::<Vec<Vec<Vec<f32>>>, _>(bytes, voice_decode_config())
     {
         return Ok(pack);
     }
@@ -354,11 +356,7 @@ async fn load_voices(path: &Path) -> Result<HashMap<String, Vec<Vec<Vec<f32>>>>,
                     voices.insert(stem, pack);
                 }
                 Err(err) => {
-                    eprintln!(
-                        "kokoro voices | skipping {}: {}",
-                        entry_path.display(),
-                        err
-                    );
+                    eprintln!("kokoro voices | skipping {}: {}", entry_path.display(), err);
                 }
             }
         }

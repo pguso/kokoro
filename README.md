@@ -14,6 +14,7 @@ A lightweight, offline Rust inference library for [Kokoro TTS](https://github.co
 - Multiple model sizes - full-precision (`model.onnx`), 8-bit-quantized (`model_quantized.onnx`), and others.
 - Multiple voices spanning English, Mandarin, Spanish, French, Japanese, Italian, Hindi, Brazilian Portuguese. Only battle tested with English.
 - Streaming and one-shot synthesis modes.
+- G2P tools: `g2p_audit()`, optional `KOKORO_G2P_LEXICON` overrides, and the `kokoro-g2p-audit` binary for phoneme/vocab checks (see [ARCHITECTURE.md](ARCHITECTURE.md)).
 
 ---
 
@@ -89,11 +90,11 @@ The first build downloads ONNX Runtime and compiles the bundled `cmudict` dictio
 ## Using the library in your own project
 
 ```bash
-cargo add kokoro-tts
+cargo add kokoro-en
 ```
 
 ```rust
-use kokoro_tts::{KokoroTts, Voice};
+use kokoro_en::{KokoroTts, Voice};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -135,7 +136,7 @@ tts.stream("af_alloy");
 ### Streaming long text
 
 ```rust
-use {futures::StreamExt, kokoro_tts::KokoroTts};
+use {futures::StreamExt, kokoro_en::KokoroTts};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

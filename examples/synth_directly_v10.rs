@@ -1,5 +1,5 @@
 use {
-    kokoro_tts::{KokoroTts, Voice},
+    kokoro_en::{KokoroTts, Voice},
     voxudio::AudioPlayer,
 };
 

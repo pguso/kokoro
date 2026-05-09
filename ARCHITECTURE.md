@@ -448,6 +448,14 @@ When speech sounds wrong, check these in order:
 
 If steps 1-6 are clean, then investigate model/voice-pack quality.
 
+### G2P debugging helpers
+
+- **[`g2p_audit`](src/g2p.rs)** returns the phoneme string plus any characters **not** present in the active tokenizer vocabulary (`unknown_phoneme_chars`). Use it to compare against another Kokoro port without relying on browser debug output.
+- **CLI**: `cargo run --bin kokoro-g2p-audit -- "Hello, world."` — prints phonemes and unknown symbols. Set `KOKORO_G2P_V11=1` when auditing strings intended for v1.1 / Mandarin-capable models.
+- **`KOKORO_G2P_LEXICON`**: path to a UTF-8 file of lines `word<TAB>ipa` (`#` comments, empty lines ignored). Overrides apply **before** CMUdict / eSpeak for that word form (case-insensitive key).
+- **`KOKORO_G2P_TRACE=1`**: per-token source (`lexicon`, `dict`, `fallback`, `heuristic`) and IPA.
+- **Homographs**: `read` / `read(2)` in CMUdict are chosen using a simple **past-marker** heuristic (`yesterday`, `ago`, `last`, … appearing earlier in the same sentence). Extend this pattern if you add more disambiguation later.
+
 ---
 
 ## Why the JavaScript implementation worked fine

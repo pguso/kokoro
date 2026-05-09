@@ -11,7 +11,7 @@ async fn main() -> anyhow::Result<()> {
     let tts = KokoroTts::new("models/model_quantized.onnx", "voices").await?;
 
     let (mut sink, mut stream) = tts.stream(Voice::new("af_heart"));
-    sink.synth("I'm a 25 year old AI product engineer with a passion for python and everything related to AI.")
+    sink.synth("Build a Text-to-Image Generator (from Scratch) takes this philosophy and applies it to one of the most exciting areas in AI today: text-to-image generation.")
         .await?;
     drop(sink);
 

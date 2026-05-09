@@ -112,24 +112,43 @@ pub fn arpa_to_ipa(arpa: &str) -> Result<String, regex::Error> {
         return Ok(Default::default());
     };
 
+    let stress = caps.get(2).map_or("", |m| m.as_str());
+    let arpa_phone = caps.get(1).map_or("", |m| m.as_str());
+
     // 处理特殊符号（2025新增）
-    if let Some(sc) = SPECIAL_CASES.iter().find(|&&(s, _)| s == &caps[1]) {
+    if let Some(sc) = SPECIAL_CASES.iter().find(|&&(s, _)| s == arpa_phone) {
         return Ok(sc.1.to_string());
     }
 
-    // 获取IPA映射
-    let phoneme = ARPA_IPA_MAP
-        .get(&caps[1])
-        .map_or_else(|| letters_to_ipa(arpa), |i| i.to_string());
+    // CMUdict `AH`: AH0 is reduced schwa; AH1/AH2/AH3 are stressed STRUT /ʌ/ (e.g. "but", "cut").
+    // Mapping AH→ə unconditionally made stressed words sound like /bət/ instead of /bʌt/.
+    //
+    // CMUdict `AA`: stressed AA (LOT/PALM) → ɑ; unstressed AA0 → ə (e.g. "-mat-" in "transformative").
+    // Mapping AA→ɑ for AA0 made unstressed syllables too dark compared to typical GenAm TTS.
+    let phoneme: String = if arpa_phone == "AH" {
+        match stress {
+            "1" | "2" | "3" => "ʌ".to_owned(),
+            _ => "ə".to_owned(),
+        }
+    } else if arpa_phone == "AA" {
+        match stress {
+            "1" | "2" | "3" => "ɑ".to_owned(),
+            _ => "ə".to_owned(),
+        }
+    } else {
+        ARPA_IPA_MAP
+            .get(arpa_phone)
+            .map_or_else(|| letters_to_ipa(arpa), |i| i.to_string())
+    };
 
     let mut result = String::with_capacity(arpa.len() * 2);
     // 添加重音标记（支持三级重音）
-    result.push(match &caps[2] {
-        "1" => 'ˈ',
-        "2" => 'ˌ',
-        "3" => '˧', // 2025新增中级重音
-        _ => '\0',
-    });
+    match stress {
+        "1" => result.push('ˈ'),
+        "2" => result.push('ˌ'),
+        "3" => result.push('˧'), // 2025新增中级重音
+        _ => {}
+    }
 
     result.push_str(&phoneme);
 
@@ -144,4 +163,29 @@ pub fn letters_to_ipa(letters: &str) -> String {
         }
     }
     res
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn ah_stressed_is_strut_not_schwa() {
+        assert_eq!(super::arpa_to_ipa("AH1").unwrap(), "ˈʌ");
+        assert_eq!(super::arpa_to_ipa("AH0").unwrap(), "ə");
+    }
+
+    #[test]
+    fn aa_stressed_is_palm_unstressed_zero_is_schwa() {
+        assert_eq!(super::arpa_to_ipa("AA1").unwrap(), "ˈɑ");
+        assert_eq!(super::arpa_to_ipa("AA0").unwrap(), "ə");
+    }
+
+    #[test]
+    fn but_word_cmudict_path_uses_strut() -> Result<(), crate::G2PError> {
+        let p = crate::g2p("But.", false)?;
+        assert!(
+            p.contains("bˈʌt") || p.starts_with("bˈʌt"),
+            "expected STRUT in 'But', got {p:?}"
+        );
+        Ok(())
+    }
 }

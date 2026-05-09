@@ -1,6 +1,7 @@
 /// Text-to-IPA conversion for English-only pipeline.
 #[path = "g2p/backend.rs"]
 mod backend;
+mod lexicon;
 
 use regex::{Error as RegexError, Regex};
 use std::{
@@ -9,7 +10,9 @@ use std::{
 };
 
 use crate::{letters_to_ipa, tokenizer::unknown_phonemes};
-use backend::{BackendSource, HybridEnglishBackend, TokenContext};
+use backend::{
+    BackendSource, EnglishG2pBackend, HybridEnglishBackend, TokenContext, cmudict_has_entry,
+};
 
 #[derive(Debug)]
 pub enum G2PError {
@@ -30,6 +33,43 @@ impl Display for G2PError {
 }
 
 impl Error for G2PError {}
+
+/// Full phoneme string plus any symbols not present in the Kokoro tokenizer vocabulary.
+///
+/// Use this to audit G2P output when comparing against another Kokoro implementation or
+/// when tuning lexicon overrides. Prefer [`unknown_phonemes`] if you already have the string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct G2pAudit {
+    pub phonemes: String,
+    pub unknown_phoneme_chars: Vec<char>,
+}
+
+/// Run [`g2p`] and collect [`unknown_phonemes`] for the result (v10 vs v11 vocab).
+pub fn g2p_audit(text: &str, use_v11: bool) -> Result<G2pAudit, G2PError> {
+    let phonemes = g2p(text, use_v11)?;
+    let unknown_phoneme_chars = unknown_phonemes(&phonemes, use_v11);
+    Ok(G2pAudit {
+        phonemes,
+        unknown_phoneme_chars,
+    })
+}
+
+/// Normalize raw eSpeak `TextToPhonemes` output to Kokoro tokenizer–safe IPA fragments.
+///
+/// Keeps the first variant before `||`, removes eSpeak pipe separators, ASCII stress
+/// digits, and apostrophe markers that are not part of the model vocabulary.
+pub fn sanitize_espeak_ipa(raw: &str) -> String {
+    let primary = raw.split("||").next().unwrap_or(raw).trim();
+    let mut cleaned = String::with_capacity(primary.len());
+    for ch in primary.chars() {
+        match ch {
+            '|' | '\'' => {}
+            '0'..='9' => {}
+            _ => cleaned.push(ch),
+        }
+    }
+    cleaned.trim().to_string()
+}
 
 impl From<RegexError> for G2PError {
     fn from(value: RegexError) -> Self {
@@ -73,7 +113,22 @@ fn normalize_ipa_for_vocab(raw: &str, use_v11: bool) -> String {
 
 fn is_acronym(token: &str) -> bool {
     let chars: Vec<char> = token.chars().collect();
-    chars.len() >= 2 && chars.len() <= 6 && chars.iter().all(|c| c.is_ascii_uppercase())
+    if chars.len() < 2 || chars.len() > 6 || !chars.iter().all(|c| c.is_ascii_uppercase()) {
+        return false;
+    }
+    // Short tokens where CMUdict homographs would mis-read initialisms (e.g. "ai" the word).
+    if matches!(
+        token,
+        "AI" | "TV" | "PC" | "VR" | "US" | "UK" | "EU" | "UN" | "HD"
+    ) {
+        return true;
+    }
+    // Headlines use ALL CAPS for ordinary words ("TEXT"); prefer CMUdict when present so we
+    // do not spell T–E–X–T. IBM/NASA use pronunciations when listed.
+    if cmudict_has_entry(&token.to_ascii_lowercase()) {
+        return false;
+    }
+    true
 }
 
 fn next_word(tokens: &[String], idx: usize) -> Option<String> {
@@ -93,6 +148,22 @@ fn previous_word(tokens: &[String], idx: usize) -> Option<String> {
         .rev()
         .find(|t| t.chars().next().is_some_and(|c| c.is_ascii_alphabetic()))
         .cloned()
+}
+
+/// Tokens before `idx` whose alphanumeric stem matches a simple past-narrative cue.
+fn sentence_has_past_markers_before(tokens: &[String], idx: usize) -> bool {
+    const MARKERS: &[&str] = &["yesterday", "ago", "last", "earlier", "previously"];
+    for t in tokens.iter().take(idx) {
+        let w = t
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .collect::<String>()
+            .to_ascii_lowercase();
+        if MARKERS.iter().any(|m| *m == w.as_str()) {
+            return true;
+        }
+    }
+    false
 }
 
 fn mixed_alnum_to_parts(token: &str) -> Vec<String> {
@@ -287,6 +358,7 @@ fn append_non_lexical(result: &mut String, token: &str) {
 fn trace_token_g2p(token: &str, ipa: &str, source: BackendSource) {
     if std::env::var("KOKORO_G2P_TRACE").ok().as_deref() == Some("1") {
         let src = match source {
+            BackendSource::Lexicon => "lexicon",
             BackendSource::Dictionary => "dict",
             BackendSource::Fallback => "fallback",
             BackendSource::Heuristic => "heuristic",
@@ -314,7 +386,43 @@ pub fn g2p(text: &str, use_v11: bool) -> Result<String, G2PError> {
             let token_context = TokenContext {
                 previous_word: previous_word(&tokens, idx),
                 next_word: next_word(&tokens, idx),
+                past_markers_before: sentence_has_past_markers_before(&tokens, idx),
             };
+            // Hyphenated tokens: prefer CMUdict/lexicon as one headword ("co-founder"); otherwise
+            // phonemize segments ("Text-to-image" → text / to / image) instead of eSpeak on the
+            // raw string (letter garbage).
+            if token.contains('-') {
+                let parts: Vec<&str> = token
+                    .split('-')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if parts.len() > 1 {
+                    let whole_hit = lexicon::lexicon_lookup(token).is_some()
+                        || backend.lookup_word(token, &token_context).is_some();
+                    if whole_hit {
+                        let (ipa, source) = backend.resolve_word(token, &token_context)?;
+                        let ipa = normalize_ipa_for_vocab(&ipa, use_v11);
+                        trace_token_g2p(token, &ipa, source);
+                        append_lexical(&mut result, &ipa);
+                        continue;
+                    }
+                    for part in parts {
+                        let part = part.to_string();
+                        if is_acronym(&part) {
+                            let ipa = normalize_ipa_for_vocab(&letters_to_ipa(&part), use_v11);
+                            trace_token_g2p(&part, &ipa, BackendSource::Dictionary);
+                            append_lexical(&mut result, &ipa);
+                            continue;
+                        }
+                        let (ipa, source) = backend.resolve_word(&part, &token_context)?;
+                        let ipa = normalize_ipa_for_vocab(&ipa, use_v11);
+                        trace_token_g2p(&part, &ipa, source);
+                        append_lexical(&mut result, &ipa);
+                    }
+                    continue;
+                }
+            }
             if is_acronym(token) {
                 let ipa = normalize_ipa_for_vocab(&letters_to_ipa(token), use_v11);
                 trace_token_g2p(token, &ipa, BackendSource::Dictionary);
@@ -331,6 +439,7 @@ pub fn g2p(text: &str, use_v11: bool) -> Result<String, G2PError> {
                     let token_context = TokenContext {
                         previous_word: previous_word(&tokens, idx),
                         next_word: next_word(&tokens, idx),
+                        past_markers_before: sentence_has_past_markers_before(&tokens, idx),
                     };
                     let (ipa, source) = backend.resolve_word(word, &token_context)?;
                     let ipa = normalize_ipa_for_vocab(&ipa, use_v11);
@@ -350,6 +459,7 @@ pub fn g2p(text: &str, use_v11: bool) -> Result<String, G2PError> {
                             let token_context = TokenContext {
                                 previous_word: previous_word(&tokens, idx),
                                 next_word: next_word(&tokens, idx),
+                                past_markers_before: sentence_has_past_markers_before(&tokens, idx),
                             };
                             let (ipa, source) = backend.resolve_word(word, &token_context)?;
                             let ipa = normalize_ipa_for_vocab(&ipa, use_v11);
@@ -361,6 +471,7 @@ pub fn g2p(text: &str, use_v11: bool) -> Result<String, G2PError> {
                     let token_context = TokenContext {
                         previous_word: previous_word(&tokens, idx),
                         next_word: next_word(&tokens, idx),
+                        past_markers_before: sentence_has_past_markers_before(&tokens, idx),
                     };
                     let (ipa, source) = if is_acronym(&part) {
                         (letters_to_ipa(&part), BackendSource::Dictionary)
@@ -487,6 +598,87 @@ mod tests {
         let a = g2p("I read books every day.", false)?;
         let b = g2p("Yesterday I read that book.", false)?;
         assert_ne!(a, b, "Expected context-sensitive homograph handling.");
+        Ok(())
+    }
+
+    #[test]
+    fn sanitize_espeak_ipa_strips_variants_and_stress_digits() {
+        assert_eq!(super::sanitize_espeak_ipa("haʊ||haʊ"), "haʊ");
+        assert_eq!(super::sanitize_espeak_ipa("twˈɛntaɪ2fˈɪv"), "twˈɛntaɪfˈɪv");
+    }
+
+    #[test]
+    fn g2p_audit_wraps_phonemes_and_unknowns() -> Result<(), super::G2PError> {
+        let a = super::g2p_audit("Hi.", false)?;
+        assert_eq!(a.phonemes, super::g2p("Hi.", false)?);
+        Ok(())
+    }
+
+    #[test]
+    fn lexicon_override_applies_before_cmudict() -> Result<(), super::G2PError> {
+        use std::collections::HashMap;
+
+        use super::lexicon::set_test_lexicon;
+        let mut m = HashMap::new();
+        m.insert("xyzzy".into(), "zˈɪzi".into());
+        set_test_lexicon(Some(m));
+        let out = super::g2p("xyzzy", false)?;
+        set_test_lexicon(None);
+        assert!(
+            out.contains("zˈɪzi"),
+            "expected lexicon IPA in output, got {out:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parse_lexicon_lines_tab_separated() {
+        let m = super::lexicon::parse_g2p_lexicon_lines("Foo\tfˈu\n# ignored\nBar\tbˈɑ");
+        assert_eq!(m.get("foo").map(String::as_str), Some("fˈu"));
+        assert_eq!(m.get("bar").map(String::as_str), Some("bˈɑ"));
+    }
+
+    #[test]
+    fn shout_case_text_uses_dictionary_not_spelling() -> Result<(), super::G2PError> {
+        let p = super::g2p("TEXT.", false)?;
+        assert!(
+            !p.contains("tˈiˈi"),
+            "expected word 'text', not letter spelling: {p:?}"
+        );
+        assert!(
+            p.contains("tˈɛk") || p.contains("tɛk"),
+            "expected EH vowel from CMUdict text: {p:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn transformative_unstressed_aa_is_schwa() -> Result<(), super::G2PError> {
+        let p = super::g2p("transformative.", false)?;
+        assert!(
+            p.contains("mət"),
+            "expected reduced vowel in '-mat-', got {p:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn hyphen_compound_splits_when_not_in_cmudict() -> Result<(), super::G2PError> {
+        let p = super::g2p("Text-to-image.", false)?;
+        assert!(
+            p.contains("tˈɛkst") && p.contains("ˈɪmədʒ"),
+            "expected per-segment phones, got {p:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn hyphen_compound_keeps_cmudict_whole_word() -> Result<(), super::G2PError> {
+        let p = super::g2p("co-founder.", false)?;
+        assert!(
+            p.contains("fˈaʊnd"),
+            "expected single-entry compound 'co-founder', got {p:?}"
+        );
         Ok(())
     }
 }

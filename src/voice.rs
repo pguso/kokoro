@@ -6,7 +6,7 @@
 //! [`Voice::new("af_heart")`].
 //!
 //! ```no_run
-//! use kokoro_tts::{KokoroTts, Voice};
+//! use kokoro_en::{KokoroTts, Voice};
 //!
 //! # async fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let tts = KokoroTts::new("models/model.onnx", "voices").await?;
