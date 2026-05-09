@@ -145,9 +145,17 @@ where
     let (tx2, rx2) = unbounded_channel();
     tokio::spawn(async move {
         while let Some(req) = rx.recv().await {
-            let (data, took) = synth_request_callback(req.text, req.voice).await?;
-            tx2.send(Response { data, took })
-                .map_err(|e| KokoroError::Send(e.to_string()))?;
+            match synth_request_callback(req.text, req.voice).await {
+                Ok((data, took)) => {
+                    if let Err(e) = tx2.send(Response { data, took }) {
+                        return Err(KokoroError::Send(e.to_string()));
+                    }
+                }
+                Err(e) => {
+                    // Keep the stream alive so later requests can still produce audio.
+                    eprintln!("synth request failed: {}", e);
+                }
+            }
         }
 
         Ok::<_, KokoroError>(())

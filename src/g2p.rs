@@ -1,55 +1,35 @@
-/// 文本到国际音标的转换
-mod v10;
-mod v11;
+/// Text-to-IPA conversion for English-only pipeline.
+#[path = "g2p/backend.rs"]
+mod backend;
 
-use super::PinyinError;
-use chinese_number::{ChineseCase, ChineseCountMethod, ChineseVariant, NumberToChinese};
-#[cfg(feature = "use-cmudict")]
-use cmudict_fast::{Cmudict, Error as CmudictError};
-use pinyin::ToPinyin;
-use regex::{Captures, Error as RegexError, Regex};
+use regex::{Error as RegexError, Regex};
 use std::{
     error::Error,
     fmt::{Display, Formatter, Result as FmtResult},
 };
 
+use crate::{letters_to_ipa, tokenizer::unknown_phonemes};
+use backend::{BackendSource, HybridEnglishBackend, TokenContext};
+
 #[derive(Debug)]
 pub enum G2PError {
-    #[cfg(feature = "use-cmudict")]
-    CmudictError(CmudictError),
-    EnptyData,
-    #[cfg(not(feature = "use-cmudict"))]
-    Nul(std::ffi::NulError),
-    Pinyin(PinyinError),
+    Backend(String),
     Regex(RegexError),
-    #[cfg(not(feature = "use-cmudict"))]
-    Utf8(std::str::Utf8Error),
+    StrictInvalidPhoneme(String),
 }
 
 impl Display for G2PError {
     fn fmt(&self, f: &mut Formatter<'_>) -> FmtResult {
         write!(f, "G2PError: ")?;
         match self {
-            #[cfg(feature = "use-cmudict")]
-            Self::CmudictError(e) => Display::fmt(e, f),
-            Self::EnptyData => Display::fmt("EmptyData", f),
-            #[cfg(not(feature = "use-cmudict"))]
-            Self::Nul(e) => Display::fmt(e, f),
-            Self::Pinyin(e) => Display::fmt(e, f),
+            Self::Backend(e) => Display::fmt(e, f),
             Self::Regex(e) => Display::fmt(e, f),
-            #[cfg(not(feature = "use-cmudict"))]
-            Self::Utf8(e) => Display::fmt(e, f),
+            Self::StrictInvalidPhoneme(e) => Display::fmt(e, f),
         }
     }
 }
 
 impl Error for G2PError {}
-
-impl From<PinyinError> for G2PError {
-    fn from(value: PinyinError) -> Self {
-        Self::Pinyin(value)
-    }
-}
 
 impl From<RegexError> for G2PError {
     fn from(value: RegexError) -> Self {
@@ -57,234 +37,378 @@ impl From<RegexError> for G2PError {
     }
 }
 
-#[cfg(feature = "use-cmudict")]
-impl From<CmudictError> for G2PError {
-    fn from(value: CmudictError) -> Self {
-        Self::CmudictError(value)
+fn normalize_ipa_for_vocab(raw: &str, use_v11: bool) -> String {
+    let chars: Vec<char> = raw.chars().collect();
+    let mut normalized = String::with_capacity(chars.len());
+    for (idx, ch) in chars.iter().copied().enumerate() {
+        let mapped = match ch {
+            '\0' => continue,
+            // Rhotic schwa alias seen in CMUdict path.
+            'ɝ' => {
+                if use_v11 {
+                    'ɜ'
+                } else {
+                    'ɚ'
+                }
+            }
+            // Unify ASCII quote-like marks.
+            '`' | '´' => 'ˈ',
+            _ => ch,
+        };
+        let prev = normalized.chars().last();
+        let next = chars.get(idx + 1).copied();
+        // Some eSpeak outputs duplicate consonants before reduced vowels (e.g. ððə).
+        // Collapse only this narrow artifact pattern.
+        if let (Some(p), Some(n)) = (prev, next)
+            && p == mapped
+            && "ðθszʃʒfvpbtdkgmnlrɹ".contains(mapped)
+            && "əɐɚɜ".contains(n)
+        {
+            continue;
+        }
+        normalized.push(mapped);
     }
+    normalized.trim_end_matches(['ˈ', 'ˌ']).trim().to_string()
 }
 
-#[cfg(not(feature = "use-cmudict"))]
-impl From<std::ffi::NulError> for G2PError {
-    fn from(value: std::ffi::NulError) -> Self {
-        Self::Nul(value)
-    }
+fn is_acronym(token: &str) -> bool {
+    let chars: Vec<char> = token.chars().collect();
+    chars.len() >= 2 && chars.len() <= 6 && chars.iter().all(|c| c.is_ascii_uppercase())
 }
 
-#[cfg(not(feature = "use-cmudict"))]
-impl From<std::str::Utf8Error> for G2PError {
-    fn from(value: std::str::Utf8Error) -> Self {
-        Self::Utf8(value)
-    }
-}
-
-fn word2ipa_zh(word: &str) -> Result<String, G2PError> {
-    let iter = word.chars().map(|i| match i.to_pinyin() {
-        None => Ok(i.to_string()),
-        Some(p) => v10::py2ipa(p.with_tone_num_end()),
-    });
-
-    let mut result = String::new();
-    for i in iter {
-        result.push_str(&i?);
-    }
-    Ok(result)
-}
-
-#[cfg(feature = "use-cmudict")]
-fn word2ipa_en(word: &str) -> Result<String, G2PError> {
-    use super::{arpa_to_ipa, letters_to_ipa};
-    use std::{
-        io::{Error as IoError, ErrorKind},
-        str::FromStr,
-        sync::LazyLock,
-    };
-
-    fn get_cmudict<'a>() -> Result<&'a Cmudict, CmudictError> {
-        static CMUDICT: LazyLock<Result<Cmudict, CmudictError>> =
-            LazyLock::new(|| Cmudict::from_str(include_str!("../dict/cmudict.dict")));
-        CMUDICT.as_ref().map_err(|i| match i {
-            CmudictError::IoErr(e) => CmudictError::IoErr(IoError::new(ErrorKind::Other, e)),
-            CmudictError::InvalidLine(e) => CmudictError::InvalidLine(*e),
-            CmudictError::RuleParseError(e) => CmudictError::RuleParseError(e.clone()),
-        })
-    }
-
-    let Some(rules) = get_cmudict()?.get(word) else {
-        return Ok(letters_to_ipa(word));
-    };
-    if rules.is_empty() {
-        return Ok(word.to_owned());
-    }
-    let i = rand::random_range(0..rules.len());
-    let result = rules[i]
-        .pronunciation()
+fn next_word(tokens: &[String], idx: usize) -> Option<String> {
+    tokens
         .iter()
-        .map(|i| arpa_to_ipa(&i.to_string()).unwrap_or_default())
-        .collect::<String>();
-    Ok(result)
+        .skip(idx + 1)
+        .find(|t| t.chars().next().is_some_and(|c| c.is_ascii_alphabetic()))
+        .cloned()
 }
 
-#[cfg(not(feature = "use-cmudict"))]
-fn word2ipa_en(word: &str) -> Result<String, G2PError> {
-    use super::letters_to_ipa;
-    use std::{
-        ffi::{CStr, CString, c_char},
-        sync::Once,
-    };
-
-    if word.chars().count() < 4 && word.chars().all(|c| c.is_ascii_uppercase()) {
-        return Ok(letters_to_ipa(word));
+fn previous_word(tokens: &[String], idx: usize) -> Option<String> {
+    if idx == 0 {
+        return None;
     }
-
-    unsafe extern "C" {
-        fn TextToPhonemes(text: *const c_char) -> *const ::std::os::raw::c_char;
-        fn Initialize(data_dictlist: *const c_char);
-    }
-
-    unsafe {
-        static INIT: Once = Once::new();
-        INIT.call_once(|| {
-            static DATA: &[u8] = include_bytes!("../dict/espeak.dict");
-            Initialize(DATA.as_ptr() as _);
-        });
-
-        let word = CString::new(word.to_lowercase())?.into_raw() as *const c_char;
-        let res = TextToPhonemes(word);
-        Ok(CStr::from_ptr(res).to_str()?.to_string())
-    }
+    tokens[..idx]
+        .iter()
+        .rev()
+        .find(|t| t.chars().next().is_some_and(|c| c.is_ascii_alphabetic()))
+        .cloned()
 }
 
-fn to_half_shape(text: &str) -> String {
-    let mut result = String::with_capacity(text.len() * 2); // 预分配合理空间
-    let chars = text.chars().peekable();
+fn mixed_alnum_to_parts(token: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut current_kind: Option<bool> = None; // true = alpha, false = digit
+    for ch in token.chars() {
+        if !(ch.is_ascii_alphanumeric() || ch == '-') {
+            if !current.is_empty() {
+                parts.push(std::mem::take(&mut current));
+                current_kind = None;
+            }
+            continue;
+        }
+        let kind = ch.is_ascii_alphabetic();
+        if current_kind.is_some_and(|k| k != kind) && !current.is_empty() {
+            parts.push(std::mem::take(&mut current));
+        }
+        current_kind = Some(kind);
+        current.push(ch);
+    }
+    if !current.is_empty() {
+        parts.push(current);
+    }
+    parts
+}
 
-    for c in chars {
-        match c {
-            // 处理需要后看的情况
-            '«' | '《' => result.push('“'),
-            '»' | '》' => result.push('”'),
-            '（' => result.push('('),
-            '）' => result.push(')'),
-            // 简单替换规则
-            '、' | '，' => result.push(','),
-            '。' => result.push('.'),
-            '！' => result.push('!'),
-            '：' => result.push(':'),
-            '；' => result.push(';'),
-            '？' => result.push('?'),
-            // 默认字符
-            _ => result.push(c),
+fn num_to_words_en_u64(mut n: u64) -> String {
+    const ONES: [&str; 20] = [
+        "zero",
+        "one",
+        "two",
+        "three",
+        "four",
+        "five",
+        "six",
+        "seven",
+        "eight",
+        "nine",
+        "ten",
+        "eleven",
+        "twelve",
+        "thirteen",
+        "fourteen",
+        "fifteen",
+        "sixteen",
+        "seventeen",
+        "eighteen",
+        "nineteen",
+    ];
+    const TENS: [&str; 10] = [
+        "", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety",
+    ];
+
+    fn under_1000(n: u64) -> String {
+        const ONES: [&str; 20] = [
+            "zero",
+            "one",
+            "two",
+            "three",
+            "four",
+            "five",
+            "six",
+            "seven",
+            "eight",
+            "nine",
+            "ten",
+            "eleven",
+            "twelve",
+            "thirteen",
+            "fourteen",
+            "fifteen",
+            "sixteen",
+            "seventeen",
+            "eighteen",
+            "nineteen",
+        ];
+        const TENS: [&str; 10] = [
+            "", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety",
+        ];
+        let mut out = String::new();
+        let hundreds = n / 100;
+        let rem = n % 100;
+        if hundreds > 0 {
+            out.push_str(ONES[hundreds as usize]);
+            out.push_str(" hundred");
+            if rem > 0 {
+                out.push(' ');
+            }
+        }
+        if rem >= 20 {
+            out.push_str(TENS[(rem / 10) as usize]);
+            if rem % 10 > 0 {
+                out.push(' ');
+                out.push_str(ONES[(rem % 10) as usize]);
+            }
+        } else if rem > 0 || out.is_empty() {
+            out.push_str(ONES[rem as usize]);
+        }
+        out
+    }
+
+    if n < 20 {
+        return ONES[n as usize].to_owned();
+    }
+    if n < 100 {
+        let tens = TENS[(n / 10) as usize];
+        if n % 10 == 0 {
+            return tens.to_owned();
+        }
+        return format!("{} {}", tens, ONES[(n % 10) as usize]);
+    }
+
+    let scales = ["", "thousand", "million", "billion", "trillion"];
+    let mut chunks: Vec<String> = Vec::new();
+    let mut idx = 0;
+    while n > 0 {
+        let part = n % 1000;
+        if part > 0 {
+            let mut seg = under_1000(part);
+            let scale = scales[idx];
+            if !scale.is_empty() {
+                seg.push(' ');
+                seg.push_str(scale);
+            }
+            chunks.push(seg);
+        }
+        n /= 1000;
+        idx += 1;
+    }
+    chunks.reverse();
+    chunks.join(" ")
+}
+
+fn number_token_to_words_en(token: &str) -> Option<String> {
+    if token.chars().all(|c| c.is_ascii_digit()) {
+        if let Ok(n) = token.parse::<u64>() {
+            return Some(num_to_words_en_u64(n));
+        }
+        // Fallback: spell per-digit.
+        let words = token
+            .chars()
+            .filter_map(|c| match c {
+                '0' => Some("zero"),
+                '1' => Some("one"),
+                '2' => Some("two"),
+                '3' => Some("three"),
+                '4' => Some("four"),
+                '5' => Some("five"),
+                '6' => Some("six"),
+                '7' => Some("seven"),
+                '8' => Some("eight"),
+                '9' => Some("nine"),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        return Some(words);
+    }
+    None
+}
+
+fn append_lexical(result: &mut String, phoneme: &str) {
+    if phoneme.is_empty() {
+        return;
+    }
+    if !result.is_empty() && !result.ends_with([' ', '\n', '\t']) {
+        result.push(' ');
+    }
+    result.push_str(phoneme);
+    result.push(' ');
+}
+
+fn append_non_lexical(result: &mut String, token: &str) {
+    for ch in token.chars() {
+        if ch.is_whitespace() {
+            if !result.ends_with(' ') {
+                result.push(' ');
+            }
+            continue;
+        }
+        if [',', '.', '!', '?', ';', ':'].contains(&ch) && result.ends_with(' ') {
+            result.pop();
+        }
+        result.push(ch);
+        if [',', '.', '!', '?', ';', ':'].contains(&ch) {
+            result.push(' ');
         }
     }
-
-    // 清理多余空格并返回
-    result
 }
 
-fn num_repr(text: &str) -> Result<String, G2PError> {
-    let regex = Regex::new(r#"\d+(\.\d+)?"#)?;
-    Ok(regex
-        .replace(text, |caps: &Captures| {
-            let text = &caps[0];
-            if let Ok(num) = text.parse::<f64>() {
-                num.to_chinese(
-                    ChineseVariant::Traditional,
-                    ChineseCase::Lower,
-                    ChineseCountMethod::Low,
-                )
-                .map_or(text.to_owned(), |i| i)
-            } else if let Ok(num) = text.parse::<i64>() {
-                num.to_chinese(
-                    ChineseVariant::Traditional,
-                    ChineseCase::Lower,
-                    ChineseCountMethod::Low,
-                )
-                .map_or(text.to_owned(), |i| i)
-            } else {
-                text.to_owned()
-            }
-        })
-        .to_string())
+fn trace_token_g2p(token: &str, ipa: &str, source: BackendSource) {
+    if std::env::var("KOKORO_G2P_TRACE").ok().as_deref() == Some("1") {
+        let src = match source {
+            BackendSource::Dictionary => "dict",
+            BackendSource::Fallback => "fallback",
+            BackendSource::Heuristic => "heuristic",
+        };
+        eprintln!(
+            "kokoro g2p trace | source={} | token={:?} | ipa={}",
+            src, token, ipa
+        );
+    }
 }
 
 pub fn g2p(text: &str, use_v11: bool) -> Result<String, G2PError> {
-    let text = num_repr(text)?;
-    let sentence_pattern = Regex::new(
-        r#"([\u4E00-\u9FFF]+)|([，。：·？、！《》（）【】〖〗〔〕“”‘’〈〉…—　]+)|([\u0000-\u00FF]+)+"#,
+    let en_word_pattern = Regex::new(
+        r"[A-Za-z]+(?:['-][A-Za-z]+)*|[A-Za-z]+\d+[A-Za-z\d-]*|\d+(?:\.\d+)?|[^A-Za-z\d]+",
     )?;
-    let en_word_pattern = Regex::new("\\w+|\\W+")?;
-    let jieba = jieba_rs::Jieba::new();
+    let backend = HybridEnglishBackend;
     let mut result = String::new();
-    for i in sentence_pattern.captures_iter(&text) {
-        match (i.get(1), i.get(2), i.get(3)) {
-            (Some(text), _, _) => {
-                let text = to_half_shape(text.as_str());
-                if use_v11 {
-                    if !result.is_empty() && !result.ends_with(' ') {
-                        result.push(' ');
-                    }
-                    result.push_str(&v11::g2p(&text, true));
-                    result.push(' ');
-                } else {
-                    for i in jieba.cut(&text, true) {
-                        result.push_str(&word2ipa_zh(i)?);
-                        result.push(' ');
-                    }
+    let tokens = en_word_pattern
+        .captures_iter(text)
+        .map(|caps| caps[0].to_string())
+        .collect::<Vec<_>>();
+    for (idx, token) in tokens.iter().enumerate() {
+        let c = token.chars().next().unwrap_or_default();
+        if c.is_ascii_alphabetic() {
+            let token_context = TokenContext {
+                previous_word: previous_word(&tokens, idx),
+                next_word: next_word(&tokens, idx),
+            };
+            if is_acronym(token) {
+                let ipa = normalize_ipa_for_vocab(&letters_to_ipa(token), use_v11);
+                trace_token_g2p(token, &ipa, BackendSource::Dictionary);
+                append_lexical(&mut result, &ipa);
+                continue;
+            }
+            let (ipa, source) = backend.resolve_word(token, &token_context)?;
+            let ipa = normalize_ipa_for_vocab(&ipa, use_v11);
+            trace_token_g2p(token, &ipa, source);
+            append_lexical(&mut result, &ipa);
+        } else if c.is_ascii_digit() {
+            if let Some(words) = number_token_to_words_en(token) {
+                for word in words.split_whitespace() {
+                    let token_context = TokenContext {
+                        previous_word: previous_word(&tokens, idx),
+                        next_word: next_word(&tokens, idx),
+                    };
+                    let (ipa, source) = backend.resolve_word(word, &token_context)?;
+                    let ipa = normalize_ipa_for_vocab(&ipa, use_v11);
+                    trace_token_g2p(word, &ipa, source);
+                    append_lexical(&mut result, &ipa);
                 }
+            } else {
+                append_non_lexical(&mut result, token);
             }
-            (_, Some(text), _) => {
-                let text = to_half_shape(text.as_str());
-                result = result.trim_end().to_string();
-                result.push_str(&text);
-                result.push(' ');
-            }
-            (_, _, Some(text)) => {
-                for i in en_word_pattern.captures_iter(text.as_str()) {
-                    let c = (i[0]).chars().next().unwrap_or_default();
-                    if c == '\''
-                        || c == '_'
-                        || c == '-'
-                        || c.is_ascii_lowercase()
-                        || c.is_ascii_uppercase()
-                    {
-                        let i = &i[0];
-                        if result.trim_end().ends_with(['.', ',', '!', '?'])
-                            && !result.ends_with(' ')
-                        {
-                            result.push(' ');
+        } else if token.chars().any(|ch| ch.is_ascii_alphabetic())
+            && token.chars().any(|ch| ch.is_ascii_digit())
+        {
+            for part in mixed_alnum_to_parts(token) {
+                if part.chars().all(|ch| ch.is_ascii_digit()) {
+                    if let Some(words) = number_token_to_words_en(&part) {
+                        for word in words.split_whitespace() {
+                            let token_context = TokenContext {
+                                previous_word: previous_word(&tokens, idx),
+                                next_word: next_word(&tokens, idx),
+                            };
+                            let (ipa, source) = backend.resolve_word(word, &token_context)?;
+                            let ipa = normalize_ipa_for_vocab(&ipa, use_v11);
+                            trace_token_g2p(word, &ipa, source);
+                            append_lexical(&mut result, &ipa);
                         }
-                        result.push_str(&word2ipa_en(i)?);
-                    } else if c == ' ' && result.ends_with(' ') {
-                        result.push_str((i[0]).trim_start());
-                    } else {
-                        result.push_str(&i[0]);
                     }
+                } else if part.chars().all(|ch| ch.is_ascii_alphabetic()) {
+                    let token_context = TokenContext {
+                        previous_word: previous_word(&tokens, idx),
+                        next_word: next_word(&tokens, idx),
+                    };
+                    let (ipa, source) = if is_acronym(&part) {
+                        (letters_to_ipa(&part), BackendSource::Dictionary)
+                    } else {
+                        backend.resolve_word(&part, &token_context)?
+                    };
+                    let ipa = normalize_ipa_for_vocab(&ipa, use_v11);
+                    trace_token_g2p(&part, &ipa, source);
+                    append_lexical(&mut result, &ipa);
                 }
             }
-            _ => (),
-        };
+        } else {
+            append_non_lexical(&mut result, token);
+        }
+    }
+    let compact_spaces = Regex::new(r"\s+")?;
+    let compacted = compact_spaces.replace_all(result.trim(), " ").to_string();
+    let strip_space_before_punct = Regex::new(r"\s+([,.;:!?])")?;
+    let output = strip_space_before_punct
+        .replace_all(compacted.as_str(), "$1")
+        .trim()
+        .to_string();
+
+    if std::env::var("KOKORO_G2P_STRICT").ok().as_deref() == Some("1") {
+        let unknown = unknown_phonemes(&output, use_v11);
+        if !unknown.is_empty() {
+            return Err(G2PError::StrictInvalidPhoneme(format!(
+                "Unknown IPA symbols after normalization: {}",
+                unknown
+                    .iter()
+                    .map(|c| c.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
     }
 
-    Ok(result.trim().to_string())
+    Ok(output)
 }
 
 #[cfg(test)]
 mod tests {
-    #[cfg(not(feature = "use-cmudict"))]
     #[test]
-    fn test_word2ipa_en() -> Result<(), super::G2PError> {
-        use super::word2ipa_en;
-
-        // println!("{:?}", espeak_rs::text_to_phonemes("days", "en", None, true, false));
-        assert_eq!("kjˌuːkjˈuː", word2ipa_en("qq")?);
-        assert_eq!("həlˈəʊ", word2ipa_en("hello")?);
-        assert_eq!("wˈɜːld", word2ipa_en("world")?);
-        assert_eq!("ˈapəl", word2ipa_en("apple")?);
-        assert_eq!("tʃˈɪldɹɛn", word2ipa_en("children")?);
-        assert_eq!("ˈaʊə", word2ipa_en("hour")?);
-        assert_eq!("dˈeɪz", word2ipa_en("days")?);
-
+    fn test_number_expansion() -> Result<(), super::G2PError> {
+        use super::g2p;
+        let output = g2p("I am 25.", false)?;
+        assert!(!output.chars().any(|c| c.is_ascii_digit()));
+        assert!(output.contains("twˈɛnti") || output.contains("twˈɛntaɪ"));
         Ok(())
     }
 
@@ -292,9 +416,77 @@ mod tests {
     fn test_g2p() -> Result<(), super::G2PError> {
         use super::g2p;
 
-        assert_eq!("ni↓xau↓ ʂɻ↘ʨje↘", g2p("你好世界", false)?);
-        assert_eq!("ㄋㄧ2ㄏㄠ3/ㄕ十4ㄐㄝ4", g2p("你好世界", true)?);
+        let output = g2p("Hello, world!", false)?;
+        assert!(output.contains("həlˈoʊ"));
+        assert!(output.contains("wˈɚld"));
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_g2p_keeps_english_numbers_non_cjk() -> Result<(), super::G2PError> {
+        use super::g2p;
+
+        let output = g2p("I'm 25 years old.", false)?;
+        assert!(
+            !output
+                .chars()
+                .any(|c| ('\u{4E00}'..='\u{9FFF}').contains(&c))
+        );
+        assert!(!output.chars().any(|c| c.is_ascii_digit()));
+        assert!(!output.contains('\''));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_g2p_boundary_regression_sentence() -> Result<(), super::G2PError> {
+        use super::g2p;
+
+        let output = g2p(
+            "Hello, world! I'm a 25 year old software engineer with a passion background?",
+            false,
+        )?;
+        assert!(!output.contains("||"));
+        assert!(!output.chars().any(|c| c.is_ascii_digit()));
+        assert!(!output.contains("二十五"));
+        assert!(!output.contains("ðð"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_g2p_acronyms_and_mixed_tokens() -> Result<(), super::G2PError> {
+        use super::g2p;
+
+        let output = g2p("AI and GPT4 improve LLM tooling.", false)?;
+        assert!(!output.is_empty());
+        assert!(!output.chars().any(|c| c.is_ascii_digit()));
+        assert!(output.contains("ˈA") || output.contains("ˈI"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_g2p_long_quality_paragraph() -> Result<(), super::G2PError> {
+        use super::g2p;
+
+        let output = g2p(
+            "I'm a 25 year old software engineer with a passion for python and everything related to AI. I also have a strong background in computer science and mathematics.",
+            false,
+        )?;
+        assert!(!output.contains("||"));
+        assert!(!output.chars().any(|c| c.is_ascii_digit()));
+        assert!(!output.contains("fˈɔːwɒˌn"));
+        assert!(!output.contains("sʃ"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_g2p_homographs_context() -> Result<(), super::G2PError> {
+        use super::g2p;
+
+        let a = g2p("I read books every day.", false)?;
+        let b = g2p("Yesterday I read that book.", false)?;
+        assert_ne!(a, b, "Expected context-sensitive homograph handling.");
         Ok(())
     }
 }

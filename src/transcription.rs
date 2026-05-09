@@ -1,4 +1,3 @@
 mod en;
-mod zh;
 
-pub use {en::*, zh::*};
+pub use en::*;

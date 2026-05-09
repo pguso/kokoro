@@ -299,6 +299,24 @@ static VOCAB_V11: LazyLock<HashMap<char, u8>> = LazyLock::new(|| {
     map
 });
 
+pub fn is_supported_phone(phone: char, v11: bool) -> bool {
+    if v11 {
+        VOCAB_V11.contains_key(&phone)
+    } else {
+        VOCAB_V10.contains_key(&phone)
+    }
+}
+
+pub fn unknown_phonemes(phonemes: &str, v11: bool) -> Vec<char> {
+    let mut unknown = Vec::new();
+    for ch in phonemes.chars() {
+        if !is_supported_phone(ch, v11) && !unknown.contains(&ch) {
+            unknown.push(ch);
+        }
+    }
+    unknown
+}
+
 pub fn get_token_ids(phonemes: &str, v11: bool) -> Vec<i64> {
     let mut tokens = Vec::with_capacity(phonemes.len() + 2);
     tokens.push(0);

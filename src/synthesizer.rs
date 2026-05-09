@@ -40,7 +40,7 @@ where
     let kokoro_output = model
         .run_async(
             inputs![
-                "tokens" => TensorRef::from_array_view(&phonemes)?,
+                "input_ids" => TensorRef::from_array_view(&phonemes)?,
                 "style" => TensorRef::from_array_view(&style)?,
                 "speed" => TensorRef::from_array_view(&speed)?,
             ],
@@ -48,8 +48,7 @@ where
         )?
         .await?;
     let elapsed = t.elapsed()?;
-    let (_, audio) = kokoro_output["audio"].try_extract_tensor::<f32>()?;
-
+    let (_, audio) = kokoro_output["waveform"].try_extract_tensor::<f32>()?;
     Ok((audio.to_owned(), elapsed))
 }
 
@@ -113,8 +112,13 @@ where
     S: AsRef<str>,
 {
     let phonemes = g2p(text.as_ref(), voice.is_v11_supported())?;
-    // #[cfg(debug_assertions)]
-    // println!("{}", phonemes);
+    #[cfg(debug_assertions)]
+    eprintln!(
+        "kokoro g2p | voice={} | text={:?} | phonemes={}",
+        voice.get_name(),
+        text.as_ref(),
+        phonemes
+    );
     match voice {
         v if v.is_v11_supported() => synth_v11(model, phonemes, pack, v.get_speed_v11()?).await,
         v if v.is_v10_supported() => synth_v10(model, phonemes, pack, v.get_speed_v10()?).await,

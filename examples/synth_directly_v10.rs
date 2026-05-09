@@ -5,11 +5,11 @@ use {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let tts = KokoroTts::new("kokoro-v1.0.int8.onnx", "voices.bin").await?;
+    let tts = KokoroTts::new("model.onnx", "af_heart.bin").await?;
     let (audio, took) = tts
         .synth(
-            "Hello, world!你好，我们是一群追逐梦想的人。我正在使用qq。",
-            Voice::ZfXiaoxiao(1.2),
+            "Hello, world! I'm a 25 year old software engineer with a passion background?",
+            Voice::AfHeart(1.0),
         )
         .await?;
     println!("Synth took: {:?}", took);
