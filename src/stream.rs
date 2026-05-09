@@ -49,64 +49,44 @@ pub struct SynthSink<S> {
 }
 
 impl<S> SynthSink<S> {
-    /// 设置语音名称
+    /// Switch the active voice for subsequent synthesis requests.
     ///
-    /// 该方法用于设置要合成的语音名称。
+    /// Accepts anything convertible into a [`Voice`], including `&str` and
+    /// `String`, so a plain voice name works:
     ///
-    /// # 参数
-    ///
-    /// * `voice_name` - 语音名称，用于选择要合成的语音。
-    ///
-    /// # 示例
-    ///
-    /// ```rust
+    /// ```no_run
     /// use kokoro_tts::{KokoroTts, Voice};
     ///
     /// #[tokio::main]
     /// async fn main() {
-    ///     let Ok(tts) = KokoroTts::new("../kokoro-v1.0.int8.onnx", "../voices.bin").await else {
+    ///     let Ok(tts) = KokoroTts::new("models/model.onnx", "voices").await else {
     ///         return;
     ///     };
-    ///     // speed: 1.0
-    ///     let (mut sink, _) = tts.stream::<&str>(Voice::ZfXiaoxiao(1.0));
-    ///     // speed: 1.8
-    ///     sink.set_voice(Voice::ZmYunxi(1.8));
+    ///     let (mut sink, _) = tts.stream::<&str, _>("af_heart");
+    ///     // Same voice but slower.
+    ///     sink.set_voice(Voice::new("af_heart").with_speed(0.8));
     /// }
     /// ```
-    ///
-    pub fn set_voice(&mut self, voice: Voice) {
-        self.voice = voice
+    pub fn set_voice<V: Into<Voice>>(&mut self, voice: V) {
+        self.voice = voice.into()
     }
 
-    /// 发送合成请求
+    /// Send a synthesis request for `text` using the currently configured voice.
     ///
-    /// 该方法用于发送语音合成请求。
-    ///
-    /// # 参数
-    ///
-    /// * `text` - 要合成的文本内容。
-    ///
-    /// # 返回值
-    ///
-    /// 如果发送成功，将返回`Ok(())`；如果发送失败，将返回一个`KokoroError`类型的错误。
-    ///
-    /// # 示例
-    ///
-    /// ```rust
-    /// use kokoro_tts::{KokoroTts, Voice};
+    /// ```no_run
+    /// use kokoro_tts::KokoroTts;
     ///
     /// #[tokio::main]
     /// async fn main() {
-    ///     let Ok(tts) = KokoroTts::new("../kokoro-v1.1-zh.onnx", "../voices-v1.1-zh.bin").await else {
+    ///     let Ok(tts) = KokoroTts::new("models/model.onnx", "voices").await else {
     ///         return;
     ///     };
-    ///     let (mut sink, _) =tts.stream(Voice::Zf003(2));
+    ///     let (mut sink, _) = tts.stream("af_heart");
     ///     let _ = sink.synth("hello world.").await;
     /// }
     /// ```
-    ///
     pub async fn synth(&mut self, text: S) -> Result<(), KokoroError> {
-        self.send((self.voice, text)).await
+        self.send((self.voice.clone(), text)).await
     }
 }
 

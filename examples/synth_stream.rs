@@ -1,20 +1,17 @@
 use {
     futures::StreamExt,
-    kokoro_tts::{KokoroTts, Voice},
+    kokoro_en::{KokoroTts, Voice},
     voxudio::AudioPlayer,
 };
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let tts = KokoroTts::new("model.onnx", "af_heart.bin").await?;
-    let (mut sink, mut stream) = tts.stream(Voice::AfHeart(1.0));
-    sink.synth("I'm a 25 year old AI product engineer with a passion for python and everything related to AI. I also have a strong background in computer science and mathematics.")
-        .await?;
+    // `voices` is the directory of `<name>.bin` files; the voice name passed
+    // below picks `voices/af_alloy.bin` automatically.
+    let tts = KokoroTts::new("models/model_quantized.onnx", "voices").await?;
 
-    sink.synth("I'm a 41 year old software engineer with a passion for python and everything related to AI. I also have a strong background in computer science and mathematics.")
-        .await?;
-
-    sink.synth("I'm a 50 year old software architect with a passion for python and everything related to AI. I also have a strong background in computer science and mathematics.")
+    let (mut sink, mut stream) = tts.stream(Voice::new("af_heart"));
+    sink.synth("I'm a 25 year old AI product engineer with a passion for python and everything related to AI.")
         .await?;
     drop(sink);
 

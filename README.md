@@ -1,59 +1,220 @@
-# Kokoro TTS的rust推理实现
+# kokoro-tts
 
-[Kokoro](https://github.com/hexgrad/kokoro)
+A lightweight, offline Rust inference library for [Kokoro TTS](https://github.com/hexgrad/kokoro) - an 82M-parameter open-weights text-to-speech model. Designed to be small, dependency-light, and easy to cross-compile to mobile.
 
-> **Kokoro**是具有8200万参数的开放式TTS型号。
-> 尽管具有轻巧的体系结构，但它的质量与大型型号相当，同时更快，更具成本效益。使用Apache许可的权重，可以将Kokoro部署从生产环境到个人项目的任何地方。
+> Kokoro is an open-weights TTS model with 82 million parameters. Despite its lightweight architecture, it delivers comparable quality to larger models while being significantly faster and more cost-efficient. With Apache-licensed weights, Kokoro can be deployed anywhere from production environments to personal projects.
 
+---
 
-## 概述
+## Features
 
-本项目包含幾个示例脚本，展示了如何使用Kokoro库进行语音合成。这些示例展示了如何直接合成语音和通过流式合成来处理更长的文本。
+- 100% offline - no network calls at runtime.
+- Cross-platform - builds on macOS, Linux, Windows; cross-compiles to Android and iOS.
+- Hardware acceleration - CoreML on macOS, CUDA on Linux/Windows, with automatic CPU fallback.
+- Multiple model sizes - full-precision (`model.onnx`), 8-bit-quantized (`model_quantized.onnx`), and others.
+- Multiple voices spanning English, Mandarin, Spanish, French, Japanese, Italian, Hindi, Brazilian Portuguese. Only battle tested with English.
+- Streaming and one-shot synthesis modes.
 
-## 前置条件
+---
 
-- Rust编程语言
-- tokio异步运行时
-- voxudio音频处理和播放的库（可选）
-- 下载模型资源，在這裡可以找到[1.0模型](https://github.com/mzdk100/kokoro/releases/tag/V1.0)和[1.1模型](https://github.com/mzdk100/kokoro/releases/tag/V1.1)
+## Quick start
 
-## 特点
-- 跨平台，可以轻松在Windows、Mac OS上构建，也可以轻松交叉编译到安卓和iOS。
-- 离线推理，不依赖网络。
-- 足够轻量级，有不同尺寸的模型可以选择（最小的模型仅88M）。
-- 发音人多样化，跨越多国语言。
+### 1. Download the model and voices
 
-## 使用方法
+The model and voice files are not bundled with this repository. Get them from the official ONNX release on Hugging Face:
 
-1. 运行示例，克隆或下载本项目到本地。在项目根目录下运行：
-    ```shell
-    cargo run --example synth_directly_v10
-    cargo run --example synth_directly_v11
-    ```
-2. 集成到自己的项目中：
-    ```shell
-    cargo add kokoro-tts
-    ```
-3. Linux依赖项
-    ```shell
-    sudo apt install libasound2-dev
-    ```
-参考[examples](examples)文件夹中的示例代码进行开发。
+> **<https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/tree/main>**
 
+You need **two** sets of files:
 
-## 许可证
+| What            | Hugging Face folder                                | Goes into local folder |
+| --------------- | -------------------------------------------------- | ---------------------- |
+| ONNX model file | [`onnx/`](https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/tree/main/onnx) | `models/`              |
+| Voice packs     | [`voices/`](https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/tree/main/voices) | `voices/`              |
 
-本项目采用Apache-2.0许可证。请查看项目中的LICENSE文件了解更多信息。
+Pick whichever variant of the model fits your hardware (any one is enough):
 
-## 注意
+| File                   | Size  | Notes                                                      |
+| ---------------------- | ----- | ---------------------------------------------------------- |
+| `model.onnx`           | ~325 MB | Full precision (fp32). Best quality. Recommended for CoreML / CUDA. |
+| `model_q8f16.onnx`     | ~160 MB | Mixed int8 / fp16. Smaller, fast on CPU.                   |
+| `model_quantized.onnx` | ~92 MB  | int8. Smallest. Some quality loss.                         |
 
-- 请确保在运行示例之前已经正确加载了模型和语音数据。
-- 示例中的语音合成参数（如语音名称、文本内容、速度等）仅作为示例，实际使用时请根据需要进行调整。
+Each voice is a separate `<name>.bin` file (e.g. `af_heart.bin`, `af_alloy.bin`). Download as many or as few as you want - the library only loads what's in the folder.
 
-## 贡献
+You can grab them via `git lfs`:
 
-如果您有任何改进意见或想要贡献代码，请随时提交Pull Request或创建Issue。
+```bash
+git lfs install
+git clone https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX
+mkdir -p models voices
+cp Kokoro-82M-v1.0-ONNX/onnx/*.onnx       models/
+cp Kokoro-82M-v1.0-ONNX/voices/*.bin      voices/
+```
 
-## 免责声明
+…or download individual files from the Hugging Face web UI and drop them into the matching folder.
 
-本项目中的示例代码仅用于演示目的。在使用本项目中的代码时，请确保遵守相关法律法规和社会主义核心价值观。开发者不对因使用本项目中的代码而导致的任何后果负责。
+After this step the layout should look like:
+
+```
+kokoro/
+├── models/
+│   ├── model.onnx                ← any one (or more) of these
+│   ├── model_q8f16.onnx
+│   └── model_quantized.onnx
+└── voices/
+    ├── af_alloy.bin
+    ├── af_heart.bin
+    ├── am_adam.bin
+    └── …                         ← whichever voices you want
+```
+
+### 2. Install platform deps
+
+- **macOS**: nothing extra required.
+- **Linux**: `sudo apt install libasound2-dev` (only needed for the `voxudio` audio playback used by the examples).
+- **Windows**: nothing extra required.
+
+### 3. Run an example
+
+```bash
+cargo run --release --example synth_directly_v10
+cargo run --release --example synth_stream
+```
+
+The first build downloads ONNX Runtime and compiles the bundled `cmudict` dictionary, so expect a couple of minutes. Subsequent builds are fast.
+
+---
+
+## Using the library in your own project
+
+```bash
+cargo add kokoro-tts
+```
+
+```rust
+use kokoro_tts::{KokoroTts, Voice};
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    // Point at the model file and the voices/ directory.
+    // The directory will load every `<name>.bin` file inside it; you can
+    // also pass a single `.bin` file to load just one voice.
+    let tts = KokoroTts::new("models/model.onnx", "voices").await?;
+
+    // Pick a voice by name. Anything that converts into `Voice` works
+    // (`&str`, `String`, or `Voice::new(...)`).
+    let (audio, took) = tts.synth("Hello, world!", Voice::new("af_heart")).await?;
+    println!("Synth took {took:?}, produced {} samples at 24 kHz", audio.len());
+
+    // The shorthand also works:
+    let _ = tts.synth("Hello again!", "af_alloy").await?;
+
+    // Speed control:
+    let _ = tts.synth("Slower.", Voice::new("af_heart").with_speed(0.85)).await?;
+
+    Ok(())
+}
+```
+
+### Voice API at a glance
+
+```rust
+Voice::new("af_alloy")                  // default speed 1.0
+Voice::new("af_alloy").with_speed(1.2)  // 20% faster
+"af_alloy".into()                       // From<&str> implementation
+```
+
+Any function taking `Voice` actually accepts `impl Into<Voice>`, so you rarely need to construct one explicitly:
+
+```rust
+tts.synth("hi", "af_alloy").await?;
+tts.stream("af_alloy");
+```
+
+### Streaming long text
+
+```rust
+use {futures::StreamExt, kokoro_tts::KokoroTts};
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let tts = KokoroTts::new("models/model_quantized.onnx", "voices").await?;
+    let (mut sink, mut stream) = tts.stream("af_alloy");
+
+    sink.synth("First sentence.").await?;
+    sink.synth("Second sentence - synthesized while the first one plays.").await?;
+    drop(sink);
+
+    while let Some((audio, took)) = stream.next().await {
+        println!("Got {} samples in {took:?}", audio.len());
+    }
+
+    Ok(())
+}
+```
+
+---
+
+## Voice naming convention
+
+Voice names follow the upstream Kokoro convention `<lang><gender>_<name>`:
+
+| Prefix | Language / accent              |
+| ------ | ------------------------------ |
+| `af`   | American English, female       |
+| `am`   | American English, male         |
+| `bf`   | British English, female        |
+| `bm`   | British English, male          |
+| `ef`   | Spanish, female                |
+| `em`   | Spanish, male                  |
+| `ff`   | French, female                 |
+| `hf`   | Hindi, female                  |
+| `hm`   | Hindi, male                    |
+| `if`   | Italian, female                |
+| `im`   | Italian, male                  |
+| `jf`   | Japanese, female               |
+| `jm`   | Japanese, male                 |
+| `pf`   | Brazilian Portuguese, female   |
+| `pm`   | Brazilian Portuguese, male     |
+| `zf`   | Mandarin Chinese, female (v1.1)|
+| `zm`   | Mandarin Chinese, male  (v1.1) |
+
+Pick the voice file you want from the [Hugging Face `voices/` folder](https://huggingface.co/onnx-community/Kokoro-82M-v1.0-ONNX/tree/main/voices) and reference it by its file-stem name (the filename without `.bin`).
+
+---
+
+## Execution providers
+
+The library auto-selects the best available backend:
+
+- **macOS** → CoreML (Neural Engine + GPU). Falls back to CPU if the model can't run on CoreML.
+- **Linux / Windows** → CUDA if available, else CPU.
+
+You can override or pin the provider with environment variables:
+
+| Variable                              | Values                                                                      |
+| ------------------------------------- | --------------------------------------------------------------------------- |
+| `KOKORO_ORT_PROVIDER`                 | `auto` (default), `cpu`, `coreml`, `cuda`                                   |
+| `KOKORO_COREML_MODEL_FORMAT`          | `neuralnetwork` (default), `mlprogram`                                      |
+| `KOKORO_COREML_COMPUTE_UNITS`         | `all` (default), `ane`, `gpu`, `cpu_only`                                   |
+| `KOKORO_COREML_STATIC_INPUT_SHAPES`   | `0` (default) / `1`                                                         |
+
+Setting `KOKORO_ORT_PROVIDER=coreml` or `=cuda` disables the automatic CPU fallback so failures surface explicitly.
+
+---
+
+## Troubleshooting
+
+- **`VoiceNotFound("af_heart")`** - the file `voices/af_heart.bin` doesn't exist. Download it from the Hugging Face `voices/` folder.
+- **`Io(... model.onnx ...)`** - the model file isn't where you said it was. Check the path you passed to `KokoroTts::new`.
+- **`no .bin voice files found in voices`** - the directory is empty. Drop at least one `<name>.bin` file in there.
+- **CoreML errors at startup** - set `KOKORO_ORT_PROVIDER=cpu` to force a known-good path. Quantized models don't run on CoreML; the library detects this and falls back to CPU automatically when `KOKORO_ORT_PROVIDER` is left at `auto`.
+
+---
+
+## License
+
+Apache-2.0. See [`LICENSE`](LICENSE).
+
+The Kokoro model weights are also Apache-2.0; check the upstream Hugging Face repo for the canonical license text covering the weights themselves.

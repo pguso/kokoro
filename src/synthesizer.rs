@@ -105,23 +105,25 @@ pub(super) async fn synth<P, S>(
     model: Weak<Mutex<Session>>,
     text: S,
     pack: P,
-    voice: Voice,
+    voice: &Voice,
+    is_v11: bool,
 ) -> Result<(Vec<f32>, Duration), KokoroError>
 where
     P: AsRef<Vec<Vec<Vec<f32>>>>,
     S: AsRef<str>,
 {
-    let phonemes = g2p(text.as_ref(), voice.is_v11_supported())?;
+    let phonemes = g2p(text.as_ref(), is_v11)?;
     #[cfg(debug_assertions)]
     eprintln!(
         "kokoro g2p | voice={} | text={:?} | phonemes={}",
-        voice.get_name(),
+        voice.name(),
         text.as_ref(),
         phonemes
     );
-    match voice {
-        v if v.is_v11_supported() => synth_v11(model, phonemes, pack, v.get_speed_v11()?).await,
-        v if v.is_v10_supported() => synth_v10(model, phonemes, pack, v.get_speed_v10()?).await,
-        v => Err(KokoroError::VoiceVersionInvalid(v.get_name().to_owned())),
+    if is_v11 {
+        // The v1.1 model expects an i32 speed; cast from the user-provided f32.
+        synth_v11(model, phonemes, pack, voice.speed() as i32).await
+    } else {
+        synth_v10(model, phonemes, pack, voice.speed()).await
     }
 }

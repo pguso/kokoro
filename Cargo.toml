@@ -1,11 +1,11 @@
 [package]
-name = "kokoro-tts"
-description = "用于Rust的轻量级AI离线语音合成器（Kokoro TTS），可轻松交叉编译到移动端"
-version = "0.3.2"
+name = "kokoro-en"
+description = "A lightweight, offline Rust inference library for Kokoro TTS - an 82M-parameter open-weights text-to-speech model. "
+version = "0.1.1"
 edition = "2024"
 keywords = ["TTS", "Offline", "Lite", "AI", "Synthesizer"]
 license = "Apache-2.0"
-repository = "https://github.com/mzdk100/kokoro.git"
+repository = "https://github.com/pguso/kokoro.git"
 readme = "README.md"
 
 [dependencies]
