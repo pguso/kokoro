@@ -48,6 +48,9 @@ fn load_lexicon_from_env() -> HashMap<String, String> {
 
 static LEXICON: LazyLock<HashMap<String, String>> = LazyLock::new(load_lexicon_from_env);
 
+static EMBEDDED_OOV: LazyLock<HashMap<String, String>> =
+    LazyLock::new(|| parse_g2p_lexicon_lines(include_str!("embedded_g2p_oov.tab")));
+
 pub(crate) fn lexicon_lookup(token: &str) -> Option<String> {
     let lower = token.to_ascii_lowercase();
     #[cfg(test)]
@@ -57,7 +60,10 @@ pub(crate) fn lexicon_lookup(token: &str) -> Option<String> {
             return map.get(&lower).cloned();
         }
     }
-    LEXICON.get(&lower).cloned()
+    LEXICON
+        .get(&lower)
+        .cloned()
+        .or_else(|| EMBEDDED_OOV.get(&lower).cloned())
 }
 
 #[cfg(test)]

@@ -8,17 +8,26 @@ license = "Apache-2.0"
 repository = "https://github.com/pguso/kokoro.git"
 readme = "README.md"
 
+[features]
+# Default: Misaki + bundled espeak-rs OOV (kokoro-js–like arbitrary spellings). Slim: cargo build --no-default-features [--features misaki-lean]
+default = ["g2p-espeak"]
+# Misaki's bundled espeak-rs (CMake + native link). Phrase-level Misaki G2P before word fallback (`phonemize_js`).
+g2p-espeak = ["misaki-rs/espeak"]
+# Marker for minimal Misaki-only builds (no bundled eSpeak); combine with --no-default-features.
+misaki-lean = []
+
 [dependencies]
 bincode = "2.0"
 cmudict-fast = "0.8.0"
+fancy-regex = "0.14"
 futures = "0.3.31"
 log = "0.4.29"
+misaki-rs = { version = "0.3.0", default-features = false }
 ndarray = "0.17.2"
 ort = { version = "2.0.0-rc.11", features = ["coreml", "cuda"] }
 pin-project = "1.1.10"
 regex = "1.12.2"
 tokio = { version = "1.49.0",features = ["fs", "rt-multi-thread","time", "sync"] }
-voice-g2p = "0.2.2"
 
 [dev-dependencies]
 anyhow = "1.0.100"

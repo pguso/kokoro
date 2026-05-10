@@ -19,17 +19,34 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Ubuntu 专属依赖安装
       - name: Setup Ubuntu dependencies
         if: matrix.os == 'ubuntu-latest'
         run: |
           sudo apt-get update
-          sudo apt install libasound2-dev
+          sudo apt install -y libasound2-dev cmake build-essential pkg-config espeak-ng
 
-      # 构建项目
-      - name: Build
+      - name: Setup macOS dependencies
+        if: matrix.os == 'macos-latest'
+        run: |
+          brew install cmake espeak-ng
+
+      # Windows: CMake often preinstalled; espeak-ng optional for CLI segment tests
+
+      - name: Build (default features = g2p-espeak)
         run: cargo build -vv
 
-      # 运行测试
-      - name: Run tests
+      - name: Run tests (default features + espeak-ng on PATH where installed)
         run: cargo test --workspace -vv
+
+  test-lean:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Ubuntu dependencies
+        run: |
+          sudo apt-get update
+          sudo apt install -y libasound2-dev cmake build-essential pkg-config
+
+      - name: Test without bundled eSpeak (Misaki-only)
+        run: cargo test --workspace --no-default-features -vv

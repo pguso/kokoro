@@ -181,7 +181,7 @@ mod tests {
 
     #[test]
     fn but_word_cmudict_path_uses_strut() -> Result<(), crate::G2PError> {
-        let p = crate::g2p("But.", false)?;
+        let p = crate::g2p_legacy("But.", false)?;
         assert!(
             p.contains("bˈʌt") || p.starts_with("bˈʌt"),
             "expected STRUT in 'But', got {p:?}"

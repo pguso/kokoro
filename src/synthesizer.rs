@@ -1,5 +1,8 @@
 use {
-    crate::{KokoroError, Voice, g2p, get_token_ids},
+    crate::{
+        KokoroError, Voice, g2p, get_token_ids,
+        pipeline::{MAX_PHONEME_CHARS, chunk_phonemes},
+    },
     ndarray::Array,
     ort::{
         inputs,
@@ -112,18 +115,30 @@ where
     P: AsRef<Vec<Vec<Vec<f32>>>>,
     S: AsRef<str>,
 {
-    let phonemes = g2p(text.as_ref(), is_v11)?;
+    let phoneme_line = g2p(text.as_ref(), is_v11)?;
     #[cfg(debug_assertions)]
     eprintln!(
         "kokoro g2p | voice={} | text={:?} | phonemes={}",
         voice.name(),
         text.as_ref(),
-        phonemes
+        phoneme_line
     );
-    if is_v11 {
-        // The v1.1 model expects an i32 speed; cast from the user-provided f32.
-        synth_v11(model, phonemes, pack, voice.speed() as i32).await
-    } else {
-        synth_v10(model, phonemes, pack, voice.speed()).await
+
+    let chunks = chunk_phonemes(&phoneme_line, MAX_PHONEME_CHARS);
+    if chunks.is_empty() {
+        return Ok((Vec::new(), Duration::ZERO));
     }
+
+    let mut audio_out = Vec::new();
+    let mut elapsed_total = Duration::ZERO;
+    for chunk in chunks {
+        let (audio, elapsed) = if is_v11 {
+            synth_v11(model.clone(), chunk, &pack, voice.speed() as i32).await?
+        } else {
+            synth_v10(model.clone(), chunk, &pack, voice.speed()).await?
+        };
+        audio_out.extend_from_slice(&audio);
+        elapsed_total += elapsed;
+    }
+    Ok((audio_out, elapsed_total))
 }

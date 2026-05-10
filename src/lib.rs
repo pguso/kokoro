@@ -1,7 +1,9 @@
 mod error;
 mod g2p;
+mod pipeline;
 mod stream;
 mod synthesizer;
+mod text_split;
 mod tokenizer;
 mod transcription;
 mod voice;
@@ -17,7 +19,12 @@ use {
     std::{collections::HashMap, env, path::Path, sync::Arc, time::Duration},
     tokio::{fs::read, sync::Mutex},
 };
-pub use {error::*, g2p::*, stream::*, tokenizer::*, transcription::*, voice::*};
+pub use {
+    error::*, g2p::capability::G2pEspeakCapability, g2p::capability::g2p_espeak_capability, g2p::*,
+    pipeline::G2pPipelineConfig, pipeline::MAX_PHONEME_CHARS, pipeline::chunk_phonemes, stream::*,
+    text_split::TextSplitterStream, text_split::split_sentences, tokenizer::*, transcription::*,
+    voice::*,
+};
 
 pub struct KokoroTts {
     model: Arc<Mutex<Session>>,
@@ -465,7 +472,7 @@ impl KokoroTts {
         let model = self.model.clone();
         let is_v11 = self.is_v11;
 
-        start_synth_session(voice.into(), move |text, voice| {
+        start_synth_session(voice.into(), move |text: String, voice| {
             let voices = voices.clone();
             let model = model.clone();
             async move {

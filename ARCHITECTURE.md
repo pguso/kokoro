@@ -31,6 +31,20 @@ If the sheet music is wrong, the performer still performs confidently — just i
 
 ---
 
+## Upstream references (Python KPipeline, kokoro-js, this crate)
+
+Three stacks implement the same model differently:
+
+| Concern | Python [`hexgrad/kokoro` `KPipeline`](https://github.com/hexgrad/kokoro/blob/main/kokoro/pipeline.py) | [kokoro-js](kokoro.js/src/kokoro.js) (this repo) | **kokoro-en** (Rust) |
+|--------|----------------|----------------|----------------|
+| English G2P | Misaki `en.G2P` + optional `EspeakFallback` for OOV | `phonemize.js`: normalize → eSpeak-NG (`phonemizer`) per segment | Default: Misaki phrase G2P matching kokoro.js **normalize/post-process** ([`phonemize_js.rs`](src/g2p/phonemize_js.rs)); legacy: CMUdict + Misaki per-token ([`g2p_legacy`](src/g2p.rs)) |
+| Long inputs | **510-character phoneme budget**, token chunking + `waterfall_last` punctuation splits | Streaming: [`TextSplitterStream`](kokoro.js/src/splitter.js) → one `phonemize` per sentence | **510-char IPA chunks** at word boundaries before ONNX ([`pipeline::chunk_phonemes`](src/pipeline.rs)); streaming splits with [`split_sentences`](src/text_split.rs) (kokoro-js–style) |
+| Non-English | Misaki ja/zh or `EspeakG2P` for several locales | Same npm phonemizer pattern | Chinese/v11 paths in [`g2p`](src/g2p.rs) / [`v11.rs`](src/g2p/v11.rs) |
+
+Misaki is the English path in official Python; kokoro-js uses **eSpeak-NG for English IPA strings** instead—so byte-identical phoneme output to JS requires matching that npm pipeline, not only swapping Rust phoneme backends. This crate prioritizes **structural** alignment (normalization, splitter, chunk budget) plus Misaki G2P unless `KOKORO_G2P_LEGACY=1`.
+
+---
+
 ## The short answer
 
 Kokoro is a neural network trained to turn **phoneme sequences** into **audio waveforms**. It has never learned what the letter `A` looks like, or that `"through"` and `"threw"` sound similar. It only knows: given this sequence of mouth-positions and sound units, produce this sound. The text-to-speech process therefore has two entirely separate stages:

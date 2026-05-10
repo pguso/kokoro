@@ -1,5 +1,5 @@
 use {
-    crate::{KokoroError, Voice},
+    crate::{KokoroError, Voice, split_sentences},
     futures::{Sink, SinkExt, Stream},
     pin_project::pin_project,
     std::{
@@ -117,7 +117,7 @@ pub(super) fn start_synth_session<F, R, S>(
     synth_request_callback: F,
 ) -> (SynthSink<S>, SynthStream)
 where
-    F: Fn(S, Voice) -> R + Send + 'static,
+    F: Fn(String, Voice) -> R + Send + 'static,
     R: Future<Output = Result<(Vec<f32>, Duration), KokoroError>> + Send,
     S: AsRef<str> + Send + 'static,
 {
@@ -125,15 +125,20 @@ where
     let (tx2, rx2) = unbounded_channel();
     tokio::spawn(async move {
         while let Some(req) = rx.recv().await {
-            match synth_request_callback(req.text, req.voice).await {
-                Ok((data, took)) => {
-                    if let Err(e) = tx2.send(Response { data, took }) {
-                        return Err(KokoroError::Send(e.to_string()));
-                    }
+            for sentence in split_sentences(req.text.as_ref()) {
+                let sentence = sentence.trim();
+                if sentence.is_empty() {
+                    continue;
                 }
-                Err(e) => {
-                    // Keep the stream alive so later requests can still produce audio.
-                    eprintln!("synth request failed: {}", e);
+                match synth_request_callback(sentence.to_string(), req.voice.clone()).await {
+                    Ok((data, took)) => {
+                        if let Err(e) = tx2.send(Response { data, took }) {
+                            return Err(KokoroError::Send(e.to_string()));
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("synth request failed: {}", e);
+                    }
                 }
             }
         }

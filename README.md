@@ -15,6 +15,7 @@ A lightweight, offline Rust inference library for [Kokoro TTS](https://github.co
 - Multiple voices spanning English, Mandarin, Spanish, French, Japanese, Italian, Hindi, Brazilian Portuguese. Only battle tested with English.
 - Streaming and one-shot synthesis modes.
 - G2P tools: `g2p_audit()`, optional `KOKORO_G2P_LEXICON` overrides, and the `kokoro-g2p-audit` binary for phoneme/vocab checks (see [ARCHITECTURE.md](ARCHITECTURE.md)).
+- **Default crate features include `g2p-espeak`**: Misaki links bundled **espeak-ng** (via CMake) for out-of-vocabulary words (kokoro-js–like behavior). Slim Misaki-only build: `cargo build --no-default-features` (optional `--features misaki-lean`). Optional system `espeak-ng` improves segment-level phonemization; see `g2p_espeak_capability()` / `KOKORO_G2P_REQUIRE_ESPEAK`.
 
 ---
 
@@ -72,9 +73,9 @@ kokoro/
 
 ### 2. Install platform deps
 
-- **macOS**: nothing extra required.
-- **Linux**: `sudo apt install libasound2-dev` (only needed for the `voxudio` audio playback used by the examples).
-- **Windows**: nothing extra required.
+- **macOS**: **CMake** and a C/C++ toolchain (Xcode CLT) for the default **g2p-espeak** feature (bundled eSpeak). Optional: `brew install espeak-ng` for CLI segment phonemes.
+- **Linux**: `sudo apt install cmake build-essential pkg-config libasound2-dev` — **cmake** / **build-essential** are needed for **g2p-espeak**; `libasound2-dev` for `voxudio` in examples. Optional: `sudo apt install espeak-ng`.
+- **Windows**: Visual Studio C++ build tools and **CMake** on `PATH` for **g2p-espeak**.
 
 ### 3. Run an example
 
@@ -83,7 +84,9 @@ cargo run --release --example synth_directly_v10
 cargo run --release --example synth_stream
 ```
 
-The first build downloads ONNX Runtime and compiles the bundled `cmudict` dictionary, so expect a couple of minutes. Subsequent builds are fast.
+The first build downloads ONNX Runtime, may compile **bundled espeak-ng** (default feature `g2p-espeak`), and compiles the bundled `cmudict` dictionary — expect several minutes. Subsequent builds are fast.
+
+If **`espeak-rs-sys`** / CMake fails with a stale build directory, run `cargo clean -p espeak-rs-sys` or `cargo clean`, ensure **CMake** is on `PATH`, then rebuild.
 
 ---
 

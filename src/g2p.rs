@@ -1,7 +1,13 @@
 /// Text-to-IPA conversion for English-only pipeline.
 #[path = "g2p/backend.rs"]
 mod backend;
+#[path = "g2p/capability.rs"]
+pub mod capability;
+#[path = "g2p/espeak_cli.rs"]
+mod espeak_cli;
 mod lexicon;
+#[path = "g2p/phonemize_js.rs"]
+mod phonemize_js;
 
 use regex::{Error as RegexError, Regex};
 use std::{
@@ -13,6 +19,7 @@ use crate::{letters_to_ipa, tokenizer::unknown_phonemes};
 use backend::{
     BackendSource, EnglishG2pBackend, HybridEnglishBackend, TokenContext, cmudict_has_entry,
 };
+use lexicon::lexicon_lookup;
 
 #[derive(Debug)]
 pub enum G2PError {
@@ -33,6 +40,43 @@ impl Display for G2PError {
 }
 
 impl Error for G2PError {}
+
+/// Map Unicode apostrophes and paired quotes to ASCII so tokenization matches prose typography.
+fn normalize_g2p_input(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '\u{2018}' | '\u{2019}' | '\u{201B}' => out.push('\''),
+            '\u{201C}' | '\u{201D}' => out.push('"'),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// French-style elision before a capitalized word (`L'Actrice`): pronounce the stem only so we do
+/// not emit `L` as a separate letter and garble the apostrophe.
+pub(super) fn strip_elided_l_article_word(token: &str) -> Option<&str> {
+    let mut chars = token.chars();
+    let first = chars.next()?;
+    if !matches!(first, 'l' | 'L') {
+        return None;
+    }
+    if chars.next() != Some('\'') {
+        return None;
+    }
+    let prefix_len = first.len_utf8() + '\''.len_utf8();
+    let rest = token.get(prefix_len..)?;
+    let mut rest_chars = rest.chars();
+    let r0 = rest_chars.next()?;
+    if !r0.is_ascii_uppercase() {
+        return None;
+    }
+    if rest.len() < 2 || !rest.chars().all(|c| c.is_ascii_alphabetic()) {
+        return None;
+    }
+    Some(rest)
+}
 
 /// Full phoneme string plus any symbols not present in the Kokoro tokenizer vocabulary.
 ///
@@ -81,6 +125,9 @@ fn normalize_ipa_for_vocab(raw: &str, use_v11: bool) -> String {
     let chars: Vec<char> = raw.chars().collect();
     let mut normalized = String::with_capacity(chars.len());
     for (idx, ch) in chars.iter().copied().enumerate() {
+        if matches!(ch, '\u{200c}' | '\u{200d}' | '\u{feff}') {
+            continue;
+        }
         let mapped = match ch {
             '\0' => continue,
             // Rhotic schwa alias seen in CMUdict path.
@@ -398,7 +445,68 @@ fn trace_token_g2p(token: &str, ipa: &str, source: BackendSource) {
     }
 }
 
+/// English grapheme-to-phoneme conversion.
+///
+/// By default uses Kokoro.js–aligned phonemization ([`phonemize_js`]): punctuation-split segments,
+/// then **segment-level `espeak-ng`** when installed (`KOKORO_G2P_SEGMENT_ESPEAK` unset), then Misaki
+/// + **default** crate feature `g2p-espeak` (bundled eSpeak OOV), else word-level Misaki + heuristics.
+/// [`capability::g2p_espeak_capability`] logs once if neither bundled nor CLI eSpeak is available.
+/// Set `KOKORO_G2P_REQUIRE_ESPEAK=1` to error instead of degrading. Disable subprocess eSpeak with
+/// `KOKORO_ESPEAK_NG=0`. Slim build: `cargo build --no-default-features` (optionally `--features misaki-lean`).
+/// Set `KOKORO_G2P_LEGACY=1` for the previous per-token CMUdict + Misaki pipeline.
+///
+/// Set `KOKORO_G2P_LANG=b` for British English (kokoro.js `language === "b"`); default is US (`a`).
+///
+/// Runtime flags are centralized in [`crate::G2pPipelineConfig`](crate::G2pPipelineConfig).
 pub fn g2p(text: &str, use_v11: bool) -> Result<String, G2PError> {
+    let cfg = crate::pipeline::G2pPipelineConfig::from_env();
+    if cfg.legacy {
+        return g2p_legacy(text, use_v11);
+    }
+
+    capability::g2p_espeak_capability();
+    capability::enforce_require_espeak_if_configured()?;
+
+    let trimmed_in = text.trim();
+    if !trimmed_in.chars().any(char::is_whitespace)
+        && let Some(ipa) = lexicon_lookup(trimmed_in)
+        && !ipa.is_empty()
+    {
+        let out = normalize_ipa_for_vocab(&ipa, use_v11);
+        return finish_g2p_output_checks(out, use_v11);
+    }
+
+    let normalized_text = normalize_g2p_input(text);
+    let british = cfg.british;
+    let raw = phonemize_js::phonemize_like_kokoro_js(&normalized_text, british, true, use_v11);
+    let output = phonemize_js::finalize_g2p_output(&raw);
+    finish_g2p_output_checks(output, use_v11)
+}
+
+fn finish_g2p_output_checks(output: String, use_v11: bool) -> Result<String, G2PError> {
+    if std::env::var("KOKORO_G2P_STRICT").ok().as_deref() == Some("1") {
+        let unknown = unknown_phonemes(&output, use_v11);
+        if !unknown.is_empty() {
+            return Err(G2PError::StrictInvalidPhoneme(format!(
+                "Unknown IPA symbols after normalization: {}",
+                unknown
+                    .iter()
+                    .map(|c| c.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
+        }
+    }
+    Ok(output)
+}
+
+/// Per-token CMUdict + Misaki pipeline used before Kokoro.js–parity phonemization.
+///
+/// Prefer [`g2p`] for output aligned with official kokoro.js; use this when you rely on
+/// embedded CMUdict homograph rules (`read`, `finance`, …) or hyphen splitting behavior.
+pub fn g2p_legacy(text: &str, use_v11: bool) -> Result<String, G2PError> {
+    let normalized_text = normalize_g2p_input(text);
+    let text = normalized_text.as_str();
     let en_word_pattern = Regex::new(
         r"[A-Za-z]+(?:['-][A-Za-z]+)*|[A-Za-z]+\d+[A-Za-z\d-]*|\d+(?:\.\d+)?|[^A-Za-z\d]+",
     )?;
@@ -416,6 +524,17 @@ pub fn g2p(text: &str, use_v11: bool) -> Result<String, G2PError> {
                 next_word: next_word(&tokens, idx),
                 past_markers_before: sentence_has_past_markers_before(&tokens, idx),
             };
+            if let Some(rest) = strip_elided_l_article_word(token) {
+                let whole_hit = lexicon::lexicon_lookup(token).is_some()
+                    || backend.lookup_word(token, &token_context).is_some();
+                if !whole_hit {
+                    let (ipa, source) = backend.resolve_word(rest, &token_context)?;
+                    let ipa = normalize_ipa_for_vocab(&ipa, use_v11);
+                    trace_token_g2p(rest, &ipa, source);
+                    append_lexical(&mut result, &ipa);
+                    continue;
+                }
+            }
             // PascalCase compounds ("AlphaGo"): no CMUdict headword; split like Alpha + Go instead
             // of eSpeak spelling each letter.
             if let Some(parts) = split_camel_case_segments(token) {
@@ -431,6 +550,13 @@ pub fn g2p(text: &str, use_v11: bool) -> Result<String, G2PError> {
                 for part in parts {
                     if is_acronym(&part) {
                         let ipa = normalize_ipa_for_vocab(&letters_to_ipa(&part), use_v11);
+                        trace_token_g2p(&part, &ipa, BackendSource::Dictionary);
+                        append_lexical(&mut result, &ipa);
+                        continue;
+                    }
+                    // "Py" is not in CMUdict; eSpeak spells letters. Use /paɪ/ like "Python" / "PyPI".
+                    if part.eq_ignore_ascii_case("Py") {
+                        let ipa = normalize_ipa_for_vocab("ˈpaɪ", use_v11);
                         trace_token_g2p(&part, &ipa, BackendSource::Dictionary);
                         append_lexical(&mut result, &ipa);
                         continue;
@@ -549,21 +675,7 @@ pub fn g2p(text: &str, use_v11: bool) -> Result<String, G2PError> {
         .trim()
         .to_string();
 
-    if std::env::var("KOKORO_G2P_STRICT").ok().as_deref() == Some("1") {
-        let unknown = unknown_phonemes(&output, use_v11);
-        if !unknown.is_empty() {
-            return Err(G2PError::StrictInvalidPhoneme(format!(
-                "Unknown IPA symbols after normalization: {}",
-                unknown
-                    .iter()
-                    .map(|c| c.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )));
-        }
-    }
-
-    Ok(output)
+    finish_g2p_output_checks(output, use_v11)
 }
 
 #[cfg(test)]
@@ -582,8 +694,14 @@ mod tests {
         use super::g2p;
 
         let output = g2p("Hello, world!", false)?;
-        assert!(output.contains("həlˈoʊ"));
-        assert!(output.contains("wˈɚld"));
+        assert!(
+            output.contains("həlˈoʊ") || output.contains("həˈloʊ") || output.contains("həˈləʊ"),
+            "expected US hello phones, got {output:?}"
+        );
+        assert!(
+            output.contains("wˈɚld") || output.contains("wˈɜːld") || output.contains("wˈɝld"),
+            "expected rhotic world, got {output:?}"
+        );
 
         Ok(())
     }
@@ -718,7 +836,7 @@ mod tests {
 
     #[test]
     fn hyphen_compound_splits_when_not_in_cmudict() -> Result<(), super::G2PError> {
-        let p = super::g2p("Text-to-image.", false)?;
+        let p = super::g2p_legacy("Text-to-image.", false)?;
         assert!(
             p.contains("tˈɛkst") && p.contains("ˈɪmədʒ"),
             "expected per-segment phones, got {p:?}"
@@ -728,7 +846,7 @@ mod tests {
 
     #[test]
     fn hyphen_compound_keeps_cmudict_whole_word() -> Result<(), super::G2PError> {
-        let p = super::g2p("co-founder.", false)?;
+        let p = super::g2p_legacy("co-founder.", false)?;
         assert!(
             p.contains("fˈaʊnd"),
             "expected single-entry compound 'co-founder', got {p:?}"
@@ -738,7 +856,7 @@ mod tests {
 
     #[test]
     fn finance_uses_noun_cmudict_variant() -> Result<(), super::G2PError> {
-        let p = super::g2p("a finance professor.", false)?;
+        let p = super::g2p_legacy("a finance professor.", false)?;
         assert!(
             p.contains("fˈaɪn"),
             "expected noun stress FI-nance (CMU finance(3)), got {p:?}"
@@ -752,7 +870,7 @@ mod tests {
 
     #[test]
     fn finance_after_to_keeps_verb_cmudict_variant() -> Result<(), super::G2PError> {
-        let p = super::g2p("to finance the plan.", false)?;
+        let p = super::g2p_legacy("to finance the plan.", false)?;
         assert!(
             p.contains("fənˈæns") || p.contains("fɪnˈæns"),
             "expected verb fi-NANCE after 'to', got {p:?}"
@@ -762,7 +880,7 @@ mod tests {
 
     #[test]
     fn camel_case_splits_alpha_go() -> Result<(), super::G2PError> {
-        let p = super::g2p("AlphaGo.", false)?;
+        let p = super::g2p_legacy("AlphaGo.", false)?;
         assert!(
             !p.contains("ˈɛlpˈi"),
             "should not letter-spell PascalCase: {p:?}"
@@ -782,5 +900,130 @@ mod tests {
         );
         assert!(super::split_camel_case_segments("alphago").is_none());
         assert!(super::split_camel_case_segments("XML").is_none());
+    }
+
+    #[test]
+    fn financial_prefers_fi_nancial_variant() -> Result<(), super::G2PError> {
+        let p = super::g2p("Financial.", false)?;
+        assert!(
+            !p.contains("fənˈæn"),
+            "expected FI-nancial (CMU financial(3)), not fi-NAN-cial: {p:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn pytorch_py_is_pie_syllable() -> Result<(), super::G2PError> {
+        let p = super::g2p_legacy("PyTorch.", false)?;
+        assert!(
+            p.contains("ˈpaɪ") && p.contains("tˈɔɹ"),
+            "expected pie + torch, got {p:?}"
+        );
+        assert!(
+            !p.contains("ˈiwˈI"),
+            "should not spell Py letter-by-letter: {p:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn kokoro_js_normalize_text_dr_smith() {
+        let n = super::phonemize_js::normalize_text("Dr. Smith works.");
+        assert!(
+            n.contains("Doctor"),
+            "expected Doctor expansion like kokoro.js, got {n:?}"
+        );
+    }
+
+    /// Loose alignment with [`kokoro.js/tests/phonemize.test.js`](../../kokoro.js/tests/phonemize.test.js)
+    /// under Misaki G2P (strings differ from npm `phonemizer` / eSpeak).
+    #[test]
+    fn kokoro_js_golden_dr_smith_doctor_prefix() -> Result<(), super::G2PError> {
+        let p = super::g2p("Dr. Smith works.", false)?;
+        assert!(
+            p.contains("kt") || p.contains("ˈd") || p.contains("dˈ"),
+            "expected Doctor-style onset in {p:?}"
+        );
+        assert!(
+            p.contains("smˈɪθ") || p.contains("mˈɪθ"),
+            "expected Smith-like cluster in {p:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn kokoro_js_phonemize_hello_world_us() -> Result<(), super::G2PError> {
+        let p = super::g2p("Hello World", false)?;
+        assert!(
+            p.contains("hə") && (p.contains("lˈo") || p.contains("ˈlo")),
+            "expected Hello phrase phones (kokoro.js-style Misaki segment), got {p:?}"
+        );
+        assert!(
+            p.contains("wˈ") || p.contains("ˈw"),
+            "expected World in phrase, got {p:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn typographic_quotes_normalize_for_word_tokens() {
+        assert_eq!(super::normalize_g2p_input("L\u{2019}Actrice"), "L'Actrice");
+        assert_eq!(super::normalize_g2p_input("\u{201C}Hi\u{201D}"), "\"Hi\"");
+    }
+
+    #[test]
+    fn strip_elided_l_article_keeps_lexicon_whole_word() {
+        assert_eq!(
+            super::strip_elided_l_article_word("L'Actrice"),
+            Some("Actrice")
+        );
+        assert!(super::strip_elided_l_article_word("l'enfer").is_none());
+        assert!(super::strip_elided_l_article_word("Let's").is_none());
+    }
+
+    #[test]
+    fn l_actrice_and_curmer_use_word_phones_not_spelling() -> Result<(), super::G2PError> {
+        let p = super::g2p(
+            "titled \"L'Actrice,\" or \"The Actress,\" is taken from a book by Louis Curmer published in 1841.",
+            false,
+        )?;
+        assert!(
+            !p.contains("sˈi jˈuː ˈɑːɹ ˈɛm ˈiː ˈɑːɹ"),
+            "should not letter-spell Curmer: {p:?}"
+        );
+        assert!(
+            !p.contains("ˈɛl ˈA sˈiː tˈiː"),
+            "should not letter-spell L'Actrice: {p:?}"
+        );
+        assert!(
+            p.contains("kˈɜː") && p.contains("mˈɜː"),
+            "Curmer should recover Cur-mer-style phones: {p:?}"
+        );
+        assert!(
+            p.contains("ˈækt ɹˈaɪs") || p.contains("ˌɛl ˈækt"),
+            "L'Actrice should use el + Act-rice heuristic: {p:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn guterson_lexicon_and_the_actress_use_di() -> Result<(), super::G2PError> {
+        let p = super::g2p(
+            "titled \"L'Actrice,\" or \"The Actress,\" is taken from a book by Louis Guterson published in 1841.",
+            false,
+        )?;
+        assert!(
+            p.contains("ɡ") && p.contains("ʌt") && p.contains("sən"),
+            "Guterson should use embedded OOV IPA (not letter spelling): {p:?}"
+        );
+        assert!(
+            !p.contains("ʤˈi jˈuː tˈiː"),
+            "should not letter-spell Guterson: {p:?}"
+        );
+        assert!(
+            p.contains("ði ˈækt"),
+            "\"the\" before Actress should be /ði/: {p:?}"
+        );
+        Ok(())
     }
 }

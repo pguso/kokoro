@@ -1,0 +1,3 @@
+# Optional built-in word<TAB>ipa overrides (extend via KOKORO_G2P_LEXICON).
+# Guterson: Misaki-only lean builds spell this OOV; keep until espeak path always covers it.
+Guterson	ˈɡʌtɚsən

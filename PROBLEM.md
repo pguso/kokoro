@@ -31,6 +31,8 @@ The G2P path chosen at runtime depends on the `Voice` enum variant, so mismatche
 
 ## The pipeline in detail
 
+> **Note:** The diagram below describes an older segmented-G2P layout used while debugging this port. The **current** English stack is: optional lexicon override → kokoro.js–aligned normalization (`phonemize_js`) → Misaki phrase G2P → tokenizer → ONNX, with **510-character phoneme chunking** before inference (`pipeline::chunk_phonemes`) and optional **`KOKORO_G2P_LEGACY`** CMUdict/Misaki token path. See [ARCHITECTURE.md](ARCHITECTURE.md) for Python KPipeline vs kokoro-js vs Rust.
+
 ```mermaid
 flowchart TD
     input["Input text"] --> segmenter
